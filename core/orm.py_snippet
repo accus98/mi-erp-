@@ -1,0 +1,4 @@
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            return self.browse(self.ids[key])
+        return self.browse([self.ids[key]])

@@ -1,0 +1,66 @@
+<nexo>
+    <!-- Sequence -->
+    <record id="seq_sale_order" model="ir.sequence">
+        <field name="name">Sales Order</field>
+        <field name="code">sale.order</field>
+        <field name="prefix">SO/%(year)s/</field>
+        <field name="padding">3</field>
+    </record>
+
+    <!-- Action -->
+    <record id="action_orders" model="ir.actions.act_window">
+        <field name="name">Sales Orders</field>
+        <field name="res_model">sale.order</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <!-- Menus -->
+    <record id="menu_sale_root" model="ir.ui.menu">
+        <field name="name">Sales</field>
+        <field name="sequence">10</field>
+    </record>
+
+    <record id="menu_sale_order" model="ir.ui.menu">
+        <field name="name">Orders</field>
+        <field name="parent_id" ref="menu_sale_root"/>
+        <field name="action_id" ref="action_orders"/>
+        <field name="sequence">10</field>
+    </record>
+
+    <!-- Views -->
+    <record id="view_order_form" model="ir.ui.view">
+        <field name="name">sale.order.form</field>
+        <field name="model">sale.order</field>
+        <field name="arch" type="xml">
+            <form>
+                <header>
+                    <button name="action_confirm" string="Confirm" type="object" class="btn-primary"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <div class="title">
+                        <h1><field name="name"/></h1>
+                    </div>
+                    <group>
+                        <field name="partner_id"/>
+                        <field name="date_order"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_order_tree" model="ir.ui.view">
+        <field name="name">sale.order.tree</field>
+        <field name="model">sale.order</field>
+        <field name="arch" type="xml">
+            <tree>
+                <field name="name"/>
+                <field name="partner_id"/>
+                <field name="date_order"/>
+                <field name="amount_total"/>
+                <field name="state"/>
+            </tree>
+        </field>
+    </record>
+</nexo>

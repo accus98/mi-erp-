@@ -1,0 +1,21 @@
+<nexo>
+    <!-- 1. Screen (Action) -->
+    <record id="action_partner" model="ir.actions.act_window">
+        <field name="name">Customers</field>
+        <field name="res_model">res.partner</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <!-- 2. Menu Item linked to Action -->
+    <record id="menu_root_p" model="ir.ui.menu">
+        <field name="name">Sales</field>
+        <field name="sequence">10</field>
+    </record>
+
+    <record id="menu_partner" model="ir.ui.menu">
+        <field name="name">Customers</field>
+        <field name="parent_id" ref="menu_root_p"/>
+        <field name="action_id" ref="action_partner"/>
+        <field name="sequence">1</field>
+    </record>
+</nexo>
