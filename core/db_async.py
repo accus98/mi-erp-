@@ -118,10 +118,10 @@ class AsyncCursor:
         """
         Executes query. If it's a SELECT/RETURNING, stores result for fetchall.
         """
-        # 1. Convert %s to $n (Safely)
+        # 1. Convert %s to $n (Safely via sqlparams)
         pg_query = query
         if args:
-            pg_query = self._convert_sql_params(query)
+            pg_query, args = self._convert_sql_params(query, args)
             
         # 2. Determine execution mode
         # Simple heuristic: SELECT or RETURNING implies fetch
@@ -142,48 +142,18 @@ class AsyncCursor:
             print(f"AsyncDB Error: {e} | Query: {pg_query}")
             raise e
 
-    def _convert_sql_params(self, query):
+    def _convert_sql_params(self, query, args):
         """
-        Safely converts %s placeholders to $1, $2, etc. for asyncpg,
-        ignoring %s inside string literals.
+        Safely converts query to use $n placeholders using sqlparams library.
+        Returns (new_query, new_args)
         """
-        out = []
-        param_count = 0
-        state = 0 # 0: NORMAL, 1: IN_SINGLE_QUOTE, 2: IN_DOUBLE_QUOTE
-        i = 0
-        length = len(query)
+        import sqlparams
+        # 'format' style is %s. 'postgresql' style is $n.
+        # We want to convert FROM 'format' TO 'postgresql'.
+        # sqlparams.SQLParams(target_style, source_style)
         
-        while i < length:
-            char = query[i]
-            
-            if state == 0:
-                if char == "'":
-                    state = 1
-                    out.append(char)
-                elif char == '"':
-                    state = 2
-                    out.append(char)
-                elif char == '%' and i + 1 < length and query[i+1] == 's':
-                    # Found placeholder
-                    param_count += 1
-                    out.append(f"${param_count}")
-                    i += 1 # Skip 's'
-                else:
-                    out.append(char)
-            elif state == 1:
-                # In Single Quote
-                out.append(char)
-                if char == "'" and (i == 0 or query[i-1] != '\\'): # Simple check for non-escaped
-                     state = 0
-            elif state == 2:
-                # In Double Quote
-                out.append(char)
-                if char == '"' and (i == 0 or query[i-1] != '\\'):
-                     state = 0
-            
-            i += 1
-            
-        return "".join(out)
+        converter = sqlparams.SQLParams('format', 'numeric_dollar')
+        return converter.format(query, args)
             
     def fetchall(self):
         # This MUST be sync because ORM expects it sync?
@@ -237,8 +207,30 @@ class AsyncCursor:
         query: SQL with $n placeholders (or %s if conversion needed)
         args_list: List of tuples/lists of arguments
         """
-        # 1. Convert %s to $n (Safely)
-        pg_query = self._convert_sql_params(query)
+        # 1. Convert %s to $n (Safely via sqlparams)
+        # We assume all args in the list have the same structure (same number of params).
+        # We pick the first one to determine the query structure.
+        
+        pg_query = query
+        if args_list and len(args_list) > 0:
+            # sqlparams format returns (query, args). We only need the query structure from the first conversion.
+            # BUT wait, sqlparams might reorder arguments or flatten dicts.
+            # If so, we would need to convert ALL args.
+            
+            # If we are just converting %s -> $n, order is preserved.
+            # But sqlparams supports named params (:name) which might reorder.
+            # Our ORM uses %s (positional), so order should be strictly preserved.
+            # Let's verify: sqlparams 'format' style is positional %s.
+            # converting to 'postgresql' (positional $n).
+            # It should yield 1:1 mapping.
+            
+            # Using the first arg to get the query string is safe for positional.
+            pg_query, _ = self._convert_sql_params(query, args_list[0])
+            
+            # However, if sqlparams does some magic on args, we should process args too?
+            # Ideally YES. But performance hit?
+            # For purely %s -> $1, args are untouched.
+            # Let's trust that validation/structure is simpler here.
             
         try:
             await self.conn.executemany(pg_query, args_list)

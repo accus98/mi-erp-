@@ -465,18 +465,24 @@ class Model(metaclass=MetaModel):
         if not rule_clause: return
         
         # Verify all IDs match the rule
-        ids_list = list(self.ids)
-        placeholders = ", ".join(["%s"] * len(ids_list))
+        all_ids = list(self.ids)
+        total_requested = len(all_ids)
+        total_matched = 0
         
-        # We need to count how many of the requested IDs match the rule
-        query = f'SELECT COUNT(*) FROM "{self._table}" WHERE id IN ({placeholders}) AND ({rule_clause})'
-        params = tuple(ids_list) + tuple(rule_params)
+        chunk_size = 1000
+        for i in range(0, total_requested, chunk_size):
+            chunk = all_ids[i:i + chunk_size]
+            
+            placeholders = ", ".join(["%s"] * len(chunk))
+            query = f'SELECT COUNT(*) FROM "{self._table}" WHERE id IN ({placeholders}) AND ({rule_clause})'
+            params = tuple(chunk) + tuple(rule_params)
+            
+            await self.env.cr.execute(query, params)
+            res = self.env.cr.fetchone()
+            if res:
+                total_matched += res[0]
         
-        await self.env.cr.execute(query, params)
-        res = self.env.cr.fetchone()
-        matched_count = res[0] if res else 0
-        
-        if matched_count != len(self.ids):
+        if total_matched != total_requested:
              raise Exception(f"Access Rule Violation: One or more records in {self._name} are restricted for operation '{operation}'.")
 
     async def read(self, fields=None):
@@ -498,6 +504,9 @@ class Model(metaclass=MetaModel):
         # 1. Fetch from Cache first? 
         # For simplicity, we fetch from DB and update cache.
         
+        # Apply Record Rules (Strict SQL Compilation)
+        rule_clause, rule_params = await self._apply_ir_rules('read')
+
         # Filter valid SQL columns
         sql_fields = [f for f in fields if f in self._fields and self._fields[f]._sql_type]
         
@@ -507,29 +516,29 @@ class Model(metaclass=MetaModel):
             cols = ", ".join([f'"{f}"' for f in sql_fields])
             
             ids_input = list(self.ids)
-            # Use mogrify or manual placeholder generation
-            # %s in wrapper converts to $1, $2... so we can pass list?
-            # No, 'IN %s' expects tuple.
-            
-            # Construct placeholders: $1, $2, ... for IDs?
-            # Wrapper logic converts %s to $n.
-            # So `id IN (%s, %s)` works if we pass expanded args.
-            
             placeholders = ", ".join(["%s"] * len(ids_input))
-            query = f'SELECT {cols} FROM "{self._table}" WHERE id IN ({placeholders})'
             
-            await self.env.cr.execute(query, tuple(ids_input))
-            rows = self.env.cr.fetchall() # returns list of Records/Dicts
+            where_sql = f'id IN ({placeholders})'
+            query_params = ids_input
             
-            # Map by ID
-            rows_map = {r['id']: r for r in rows}
+            if rule_clause:
+                where_sql += f' AND ({rule_clause})'
+                query_params.extend(rule_params)
             
-            for id_val in self.ids:
-                if id_val in rows_map:
-                    row = rows_map[id_val]
-                    # Update Cache
-                    for f in sql_fields:
-                        self.env.cache[(self._name, id_val, f)] = row[f]
+            query = f'SELECT {cols} FROM "{self._table}" WHERE {where_sql}'
+            
+            await self.env.cr.execute(query, tuple(query_params))
+        rows = self.env.cr.fetchall() # returns list of Records/Dicts
+        
+        # Map by ID
+        rows_map = {r['id']: r for r in rows}
+        
+        for id_val in self.ids:
+            if id_val in rows_map:
+                row = rows_map[id_val]
+                # Update Cache
+                for f in sql_fields:
+                    self.env.cache[(self._name, id_val, f)] = row[f]
         
         # Collect M2O to resolve
         m2o_to_resolve = {} # {model: {id, ...}}
