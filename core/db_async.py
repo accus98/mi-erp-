@@ -122,6 +122,25 @@ class AsyncCursor:
         pg_query = query
         if args:
             pg_query = self._convert_sql_params(query)
+            
+        # 2. Determine execution mode
+        # Simple heuristic: SELECT or RETURNING implies fetch
+        normalized = pg_query.strip().upper()
+        is_fetch = normalized.startswith("SELECT") or "RETURNING" in normalized
+        
+        args = args or ()
+        
+        try:
+            if is_fetch:
+                # Use fetch for data
+                self._last_result = await self.conn.fetch(pg_query, *args)
+            else:
+                # Use execute for commands (INSERT, UPDATE, DELETE without returning)
+                await self.conn.execute(pg_query, *args)
+                self._last_result = [] # No result
+        except Exception as e:
+            print(f"AsyncDB Error: {e} | Query: {pg_query}")
+            raise e
 
     def _convert_sql_params(self, query):
         """
@@ -155,14 +174,6 @@ class AsyncCursor:
                 # In Single Quote
                 out.append(char)
                 if char == "'" and (i == 0 or query[i-1] != '\\'): # Simple check for non-escaped
-                     # Basic SQL escape check is '' for ' inside string usually, or backslash.
-                     # Postgres standard strings use ''. Backslash depends on config.
-                     # For simplicity assume standard SQL '' escaping or strict quote.
-                     # Let's peek behind for '', if we are at i.
-                     # If previous char was ', then we might be escaping?
-                     # Standard parser is complex. Let's assume standard toggle.
-                     # Use peeking for escaped quotes if needed.
-                     # For now, toggling on same quote is robust enough for typical migration.
                      state = 0
             elif state == 2:
                 # In Double Quote
@@ -173,25 +184,6 @@ class AsyncCursor:
             i += 1
             
         return "".join(out)
-            
-        # 2. Determine execution mode
-        # Simple heuristic: SELECT or RETURNING implies fetch
-        normalized = pg_query.strip().upper()
-        is_fetch = normalized.startswith("SELECT") or "RETURNING" in normalized
-        
-        args = args or ()
-        
-        try:
-            if is_fetch:
-                # Use fetch for data
-                self._last_result = await self.conn.fetch(pg_query, *args)
-            else:
-                # Use execute for commands (INSERT, UPDATE, DELETE without returning)
-                await self.conn.execute(pg_query, *args)
-                self._last_result = [] # No result
-        except Exception as e:
-            print(f"AsyncDB Error: {e} | Query: {pg_query}")
-            raise e
             
     def fetchall(self):
         # This MUST be sync because ORM expects it sync?
