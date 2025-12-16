@@ -12,6 +12,7 @@ class Environment:
         # Cache structure: {(model_name, id, field_name): value}
         self.cache = {}
         self._model_cache = {} # Cache for model classes/instances
+        self.permission_cache = {} # Cache for access rights: {(model_name, operation): bool}
 
     @property
     def registry(self):
