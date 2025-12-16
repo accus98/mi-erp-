@@ -144,9 +144,10 @@ class ModuleLoader:
             # Load Data (XML)
             data_files = manifest.get('data', [])
             for df in data_files:
-                if os.path.exists(file_path):
+                full_path = os.path.join(mod_path, df)
+                if os.path.exists(full_path):
                     try:
-                        xml_loader.load_file(file_path, module=mod_name)
+                        xml_loader.load_file(full_path, module=mod_name)
                     except Exception as e:
                         print(f"Failed to load XML {df}: {e}")
             
