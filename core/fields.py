@@ -7,7 +7,7 @@ class Field:
     _type = None
     _sql_type = None
 
-    def __init__(self, string=None, required=False, help=None, readonly=False, compute=None, store=True, default=None):
+    def __init__(self, string=None, required=False, help=None, readonly=False, compute=None, store=True, default=None, translate=False):
         self.string = string
         self.required = required
         self.help = help
@@ -16,6 +16,7 @@ class Field:
         self.compute = compute
         self.store = store
         self.default = default
+        self.translate = translate
         
         if compute and not store:
             self.store = False
@@ -32,6 +33,28 @@ class Field:
         id_val = record.ids[0]
         key = (record._name, id_val, self.name)
         
+        # Translation Logic
+        lang = record.env.context.get('lang')
+        if getattr(self, 'translate', False) and lang and lang != 'en_US':
+             key_trans = (record._name, id_val, self.name, lang)
+             if key_trans in record.env.cache:
+                 return record.env.cache[key_trans]
+             
+             # Fetch Translation
+             trans = record.env['ir.translation'].search([
+                 ('name', '=', f"{record._name},{self.name}"),
+                 ('res_id', '=', id_val),
+                 ('lang', '=', lang)
+             ], limit=1)
+             
+             if trans:
+                 val = trans[0].value
+                 record.env.cache[key_trans] = val
+                 return val
+             else:
+                 # Fallback to source (handled below)
+                 pass
+
         if key in record.env.cache:
             return record.env.cache[key]
         
@@ -49,6 +72,12 @@ class Field:
         # record.ensure_one() # Write handles multiple records!
         if self.store and not self.compute: 
              record.write({self.name: value})
+        
+        # Update Cache always (for computed fields or write result)
+        # Note: If write() is called, it might update cache too via invalidate/recompute?
+        # But for non-stored computed fields, we MUST update cache here.
+        for rid in record.ids:
+             record.env.cache[(record._name, rid, self.name)] = value
 
 class Char(Field):
     _type = 'char'
@@ -82,6 +111,10 @@ class Float(Field):
 class Datetime(Field):
     _type = 'datetime'
     _sql_type = 'TIMESTAMP'
+
+class Date(Field):
+    _type = 'date'
+    _sql_type = 'DATE'
 
 DateTime = Datetime
 

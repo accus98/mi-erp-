@@ -32,3 +32,18 @@ class Environment:
     def user(self):
         """Returns the RecordSet of the current user."""
         return self.get('res.users').browse([self.uid])
+
+    @property
+    def company(self):
+        """Returns the current Company RecordSet."""
+        # Check Context first for overrides
+        cid = self.context.get('company_id')
+        if cid:
+            return self.get('res.company').browse([cid])
+
+        # For now, return user's default company
+        user = self.user
+        if hasattr(user, 'company_id') and user.company_id:
+             return user.company_id
+        # Fallback or initialization
+        return self.get('res.company').browse([]) # Empty if not set

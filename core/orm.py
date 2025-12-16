@@ -2,7 +2,7 @@ import inspect
 from datetime import datetime
 from typing import List, Dict, Any, Tuple
 from .registry import Registry
-from .fields import Field, Integer, Datetime, Many2one, One2many, Many2many, Binary
+from .fields import Field, Integer, Datetime, Many2one, One2many, Many2many, Binary, Char, Text
 from .db import Database
 
 class MetaModel(type):
@@ -148,14 +148,38 @@ class Model(metaclass=MetaModel):
         col = perm_map.get(operation)
         if not col: return True
         
+        # Get User Groups (Transitive)
+        user_groups = []
+        try:
+            # We access res.users dynamically to avoid circular imports
+            # Check if res.users is in registry
+            if Registry.get('res.users'):
+                user = self.env['res.users'].browse(self.env.uid)
+                if hasattr(user, 'get_group_ids'):
+                    user_groups = user.get_group_ids()
+        except Exception as e:
+            # Fallback if something breaks during boot or early init
+            print(f"Access Check Warning: Could not fetch groups: {e}")
+            pass
+
         cr = self.env.cr
+        
+        if user_groups:
+            placeholders = ", ".join(["%s"] * len(user_groups))
+            group_clause = f"(a.group_id IS NULL OR a.group_id IN ({placeholders}))"
+            params = (self._name,) + tuple(user_groups)
+        else:
+            group_clause = "a.group_id IS NULL"
+            params = (self._name,)
+
         query = f"""
             SELECT 1 FROM ir_model_access a 
             JOIN ir_model m ON a.model_id = m.id
             WHERE m.model = %s AND a.{col} = TRUE
+            AND {group_clause}
             LIMIT 1
         """
-        cr.execute(query, (self._name,))
+        cr.execute(query, params)
         if cr.fetchone():
             return True
         raise Exception(f"Access Denied: You cannot {operation} document {self._name}")
@@ -225,6 +249,7 @@ class Model(metaclass=MetaModel):
         user_obj = self.env.user 
         eval_context = {
             'user': user_obj,
+            'company': self.env.company,
             'time': datetime,
             'datetime': datetime
         }
@@ -335,6 +360,39 @@ class Model(metaclass=MetaModel):
         if not fields:
             fields = list(self._fields.keys())
             
+        # BULK PREFETCH TRANSLATIONS
+        lang = self.env.context.get('lang')
+        if lang and lang != 'en_US':
+             trans_fields = [f for f in fields if f in self._fields and getattr(self._fields[f], 'translate', False)]
+             if trans_fields:
+                  names = [f"{self._name},{f}" for f in trans_fields]
+                  # Avoid potential query size issues with huge IDs lists, but fine for now
+                  if self.ids:
+                      ids_tuple = tuple(self.ids)
+                      names_tuple = tuple(names)
+                      
+                      # Handle single item tuple formatting for syntax
+                      ids_placeholder = ",".join(["%s"] * len(ids_tuple))
+                      names_placeholder = ",".join(["%s"] * len(names_tuple))
+                      
+                      query = f"""
+                        SELECT res_id, name, value 
+                        FROM ir_translation 
+                        WHERE res_id IN ({ids_placeholder}) 
+                          AND name IN ({names_placeholder}) 
+                          AND lang = %s
+                      """
+                      params = ids_tuple + names_tuple + (lang,)
+                      
+                      self.env.cr.execute(query, params)
+                      rows = self.env.cr.fetchall()
+                      
+                      for r_id, r_name, r_value in rows:
+                          # name format: "model_name,field_name"
+                          f_name = r_name.split(',')[1] 
+                          key_trans = (self._name, r_id, f_name, lang)
+                          self.env.cache[key_trans] = r_value
+
         for record in self:
             vals = {'id': record.id}
             for fname in fields:
@@ -385,6 +443,8 @@ class Model(metaclass=MetaModel):
         field = self._fields[field_name]
         Comodel = self.env[field.comodel_name]
         
+        if commands is None: return
+
         for cmd in commands:
             if not isinstance(cmd, (list, tuple)): continue
             op = cmd[0]
@@ -512,6 +572,11 @@ class Model(metaclass=MetaModel):
         o2m_values = {}
         binary_values = {}
         
+        translation_values = {}
+        
+        lang = self.env.context.get('lang')
+        is_translation_write = lang and lang != 'en_US'
+
         for k, v in list(vals.items()):
             if k in self._fields:
                 field = self._fields[k]
@@ -521,6 +586,8 @@ class Model(metaclass=MetaModel):
                     o2m_values[k] = vals.pop(k)
                 elif isinstance(field, Binary):
                     binary_values[k] = vals.pop(k)
+                elif getattr(field, 'translate', False) and is_translation_write:
+                    translation_values[k] = vals.pop(k)
 
         vals['write_date'] = datetime.now()
         valid_cols = [k for k in vals if k in self._fields and self._fields[k]._sql_type]
@@ -564,9 +631,44 @@ class Model(metaclass=MetaModel):
             for record in self:
                 self._write_binary(record, binary_values)
 
-        all_changed = list(vals.keys()) + list(m2m_values.keys()) + list(o2m_values.keys()) + list(binary_values.keys())
+        if translation_values:
+             self._write_translation(translation_values, lang)
+
+        all_changed = list(vals.keys()) + list(m2m_values.keys()) + list(o2m_values.keys()) + list(binary_values.keys()) + list(translation_values.keys())
         self._recompute(all_changed)
         return True
+
+    def _write_translation(self, values, lang):
+        Translation = self.env['ir.translation']
+        for record in self:
+            for field_name, value in values.items():
+                key_name = f"{self._name},{field_name}"
+                # Find existing
+                domain = [
+                    ('name', '=', key_name),
+                    ('res_id', '=', record.id),
+                    ('lang', '=', lang),
+                    ('type', '=', 'model')
+                ]
+                existing = Translation.search(domain, limit=1)
+                if existing:
+                    existing.write({'value': value, 'state': 'translated'})
+                else:
+                    Translation.create({
+                        'name': key_name,
+                        'res_id': record.id,
+                        'lang': lang,
+                        'type': 'model',
+                        'src': '', 
+                        'value': value,
+                        'state': 'translated'
+                    })
+                
+                # Invalidate Cache for this field
+                # Odoo style: self.env.cache.invalidate([(self._name, record.id, field_name)])
+                # Our simple cache:
+                if (self._name, record.id, field_name) in self.env.cache:
+                    del self.env.cache[(self._name, record.id, field_name)]
         
     def _write_binary(self, record, values):
         """

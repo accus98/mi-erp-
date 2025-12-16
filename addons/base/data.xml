@@ -18,4 +18,19 @@
         <field name="action_id" ref="action_partner"/>
         <field name="sequence">1</field>
     </record>
+
+    <!-- Groups -->
+    <record id="group_user" model="res.groups">
+        <field name="name">User</field>
+    </record>
+
+    <record id="group_manager" model="res.groups">
+        <field name="name">Manager</field>
+        <field name="implied_ids" eval="[(4, ref('group_user'))]"/>
+    </record>
+
+    <record id="group_system" model="res.groups">
+        <field name="name">Administrator</field>
+        <field name="implied_ids" eval="[(4, ref('group_manager'))]"/>
+    </record>
 </nexo>

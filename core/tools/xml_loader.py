@@ -46,10 +46,28 @@ class XmlLoader:
             fname = field.attrib.get('name')
             fref = field.attrib.get('ref')
             ftype = field.attrib.get('type')
+            feval = field.attrib.get('eval')
             
             fval = None
             
-            if ftype == 'xml' or (len(field) > 0 and not fref):
+            if feval:
+                try:
+                    # Define context for eval
+                    def ref(xml_id):
+                        t_mod = module
+                        t_name = xml_id
+                        if '.' in xml_id:
+                            t_mod, t_name = xml_id.split('.', 1)
+                        res = IMD._xmlid_to_res_id(t_mod, t_name)
+                        if not res:
+                            raise ValueError(f"Reference not found: {xml_id}")
+                        return res
+                        
+                    fval = eval(feval, {'ref': ref, 'True': True, 'False': False, 'None': None})
+                    vals[fname] = fval
+                except Exception as e:
+                    print(f"Error evaluating {feval} in {xml_id}: {e}")
+            elif ftype == 'xml' or (len(field) > 0 and not fref):
                 # Serialize children to XML string
                 # We want inner content, not the <field> tag itself.
                 # ElementTree doesn't have "inner_xml".
@@ -60,18 +78,9 @@ class XmlLoader:
                     chunks.append(ET.tostring(child, encoding='unicode'))
                     if child.tail: chunks.append(child.tail)
                 fval = "".join(chunks).strip()
-            else:
-                fval = field.text
-            
-            if fname == 'arch':
-                # Infer 'type' if this is a View
-                if model_name == 'ir.ui.view' and len(field) > 0:
-                    vals['type'] = field[0].tag
-                
-                print(f"DEBUG XML LOADER: {fname} type={ftype} val_len={len(fval) if fval else 0} val={fval[:20] if fval else 'None'}")
-
-            if fref:
-                # Reference handling
+                vals[fname] = fval
+            elif fref:
+                 # Reference handling
                 target_mod = module
                 target_name = fref
                 if '.' in fref:
@@ -85,6 +94,7 @@ class XmlLoader:
                 else:
                     print(f"Warning: Reference {fref} not found for field {fname}.")
             else:
+                fval = field.text
                 vals[fname] = fval
                 
         # 3. Write/Create

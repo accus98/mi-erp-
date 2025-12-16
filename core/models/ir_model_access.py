@@ -7,7 +7,7 @@ class IrModelAccess(Model):
 
     name = Char(string='Name', required=True)
     model_id = Many2one('ir.model', string='Model', required=True, ondelete='cascade')
-    group_id = Char(string='Group', help="For now a string dummy") # TODO: Link to res.groups
+    group_id = Many2one('res.groups', string='Group')
     perm_read = Boolean(string='Read Access')
     perm_write = Boolean(string='Write Access')
     perm_create = Boolean(string='Create Access')

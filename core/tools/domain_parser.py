@@ -156,7 +156,16 @@ class DomainParser:
             elif isinstance(token, (list, tuple)):
                 # Leaf ('field', 'op', 'val')
                 field, operator, value = token
-                if isinstance(value, (list, tuple)) and operator.lower() in ('in', 'not in'):
+                if value is False or value is None:
+                    if operator == '=':
+                        stack.append(f'"{field}" IS NULL')
+                    elif operator == '!=':
+                        stack.append(f'"{field}" IS NOT NULL')
+                    else:
+                         # Fallback/Error? passing as param might still fail but let it be
+                        stack.append(f'"{field}" {operator} %s')
+                        params.append(value)
+                elif isinstance(value, (list, tuple)) and operator.lower() in ('in', 'not in'):
                     if not value:
                          # Handle empty list: id in [] -> False
                          stack.append("0=1") 

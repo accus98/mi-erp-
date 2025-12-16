@@ -5,6 +5,8 @@ from . import ir_cron
 from . import ir_attachment
 from . import ir_module
 from . import ir_sequence
+from . import ir_sequence_date_range
+from . import ir_translation
 from . import ir_model_data
 from . import ir_model_access
 from . import ir_ui_view

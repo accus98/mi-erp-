@@ -1,5 +1,5 @@
 from core.orm import Model
-from core.fields import Char, Integer
+from core.fields import Char, Integer, Boolean, Many2one, One2many
 import datetime
 
 class IrSequence(Model):
@@ -13,24 +13,80 @@ class IrSequence(Model):
     number_next = Integer(string='Next Number', default=1)
     number_increment = Integer(string='Increment', default=1)
     
+    company_id = Many2one('res.company', string='Company')
+    use_date_range = Boolean(string='Use Date Range', default=False)
+    date_range_ids = One2many('ir.sequence.date_range', inverse_name='sequence_id', string='Date Ranges')
+    
     def next_by_code(self, code):
         """
         Get the next number for the given code.
+        Supports multi-company and date ranges.
         """
-        # Search for sequence
-        # We need a context or environment usually. 
-        # Since this is a method on the model, 'self' is the empty recordset with env.
+        # 1. Filter by Company
+        domain = [('code', '=', code)]
+        company_id = self.env.company.id
+        if company_id:
+            domain.extend(['|', ('company_id', '=', company_id), ('company_id', '=', None)])
+        else:
+            domain.append(('company_id', '=', None))
+            
+        # Order by specific company first, then generic? Assumes user wants closest match.
+        # But usually generic sequences serve all. 
+        # If duplicated code for different companies, we pick 'company_id = user.company_id' if exists.
         
-        # This acts as a static method on the model usually called via env['ir.sequence'].next_by_code('code')
-        seqs = self.search([('code', '=', code)])
+        seqs = self.search(domain)
         if not seqs:
             return None
         
-        seq = seqs[0]
+        # Pick best match: prefer exact company match over None
+        seq = None
+        for s in seqs:
+            if s.company_id.id == company_id:
+                seq = s
+                break
+        if not seq:
+            seq = seqs[0]
         
-        # 1. Calculate Prefix
-        # Support %(year)s, %(month)s, %(day)s
-        now = datetime.datetime.now()
+        # 2. Date Context
+        ctx_date = self.env.context.get('date')
+        if not ctx_date:
+            now = datetime.datetime.now()
+            date_val = now.date()
+        else:
+             # ctx_date might be string 'YYYY-MM-DD'
+             if isinstance(ctx_date, str):
+                 date_val = datetime.datetime.strptime(ctx_date, '%Y-%m-%d').date()
+                 now = datetime.datetime.combine(date_val, datetime.datetime.min.time()) # Approx
+             else:
+                 date_val = ctx_date
+                 now = datetime.datetime.combine(date_val, datetime.datetime.min.time())
+
+        # 3. Handle Date Ranges
+        if seq.use_date_range:
+            # Find range covering date_val
+            ranges = self.env['ir.sequence.date_range'].search([
+                ('sequence_id', '=', seq.id),
+                ('date_from', '<=', date_val),
+                ('date_to', '>=', date_val)
+            ], limit=1)
+            
+            if ranges:
+                dt_range = ranges[0]
+                number_next_actual = dt_range.number_next
+                # Update Range
+                dt_range.write({'number_next': dt_range.number_next + seq.number_increment})
+                # No change to main sequence number_next
+            else:
+                 # No range found? Create one automatically? 
+                 # Professional behavior: usually create if auto-create logic exists (e.g. yearly).
+                 # For now, fallback to main sequence or error. Fallback to main.
+                 number_next_actual = seq.number_next
+                 seq.write({'number_next': seq.number_next + seq.number_increment})
+        else:
+            number_next_actual = seq.number_next
+            seq.write({'number_next': seq.number_next + seq.number_increment})
+
+        # 4. Calculate Prefix
         prefix = seq.prefix or ''
         try:
             prefix = prefix % {
@@ -40,13 +96,9 @@ class IrSequence(Model):
                 'y': now.strftime('%y')
             }
         except:
-            pass # Keep raw if format fails
+            pass 
             
-        # 2. Format Number
-        number = str(seq.number_next).zfill(int(seq.padding))
-        
-        # 3. Update DB
-        # Use SQL update to avoid concurrency issues ideally, but ORM write is okay for MVP
-        seq.write({'number_next': seq.number_next + seq.number_increment})
+        # 5. Format Number
+        number = str(number_next_actual).zfill(int(seq.padding))
         
         return f"{prefix}{number}"

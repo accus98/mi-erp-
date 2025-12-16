@@ -1,7 +1,7 @@
 from core.orm import Model
 from core.fields import Char, Many2one
 from core.orm import Model
-from core.fields import Char, Many2one
+from core.fields import Char, Many2one, Many2many
 from core.auth import verify_password, get_password_hash
 
 class ResUsers(Model):
@@ -11,6 +11,10 @@ class ResUsers(Model):
     login = Char(string="Login", required=True)
     password = Char(string="Password")
     partner_id = Many2one('res.partner', string="Related Partner")
+    groups_id = Many2many('res.groups', string="Groups")
+    
+    company_id = Many2one('res.company', string='Company', required=False) # Make required later
+    company_ids = Many2many('res.company', string='Allowed Companies')
 
     @classmethod
     def create(cls, env, vals): 
@@ -76,3 +80,51 @@ class ResUsers(Model):
             return user.id
         
         return None
+
+    def get_group_ids(self):
+        """
+        Return list of all group IDs this user belongs to, 
+        including implied groups (transitive closure).
+        """
+        if not self: return []
+        
+        # Start with direct groups
+        # We use explicit SQL for performance and to avoid infinite recursion issues 
+        # if the ORM tries to check access rights while computing groups.
+        
+        # 1. Get direct groups
+        self.env.cr.execute(
+            'SELECT res_groups_id FROM res_groups_res_users_rel WHERE res_users_id = %s', 
+            (self.id,)
+        )
+        group_ids = set(row[0] for row in self.env.cr.fetchall())
+        
+        # 2. Expand implied groups (Breadth-First Search)
+        # implied structure: res_groups_implied_rel (gid, hid) -> gid inherits hid
+        # gid implies hid. If I have distinct gid, I also have hid.
+        # Wait, the checking naming in res_groups.py:
+        # implied_ids = Many2many('res.groups', 'res_groups_implied_rel', 'gid', 'hid', string='Inherits')
+        # gid is the group that *has* the implied ids. hid is the implied group.
+        # So providing gid implies having hid.
+        
+        to_process = list(group_ids)
+        processed = set()
+        
+        while to_process:
+            gid = to_process.pop(0)
+            if gid in processed: continue
+            processed.add(gid)
+            
+            # Find groups implied by gid
+            # SELECT hid FROM res_groups_implied_rel WHERE gid = %s
+            self.env.cr.execute(
+                'SELECT hid FROM res_groups_implied_rel WHERE gid = %s',
+                (gid,)
+            )
+            for row in self.env.cr.fetchall():
+                implied_gid = row[0]
+                if implied_gid not in group_ids:
+                    group_ids.add(implied_gid)
+                    to_process.append(implied_gid)
+                    
+        return list(group_ids)

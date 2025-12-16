@@ -27,8 +27,24 @@ def reset_admin():
         env['res.users'].create({
             'name': 'Administrator',
             'login': 'admin', 
-            'password': 'admin_password'
         })
+    
+    # Assign to Admin Group
+    from addons.base.models.res_groups import ResGroups
+    ResGroups._auto_init(cr)
+    
+    admin_group = env['res.groups'].search([('name', '=', 'Administrator')])
+    if admin_group:
+        users = env['res.users'].search([('login', '=', 'admin')])
+        if users:
+            # Check if likely already linked? 
+            # ORM write handles M2M. (6, 0, ids) or list of ids replacement.
+            # But wait, ResUsers.write expects list of IDs for M2M (direct assignment).
+            # If we want to ADD, we should read existing.
+            # Simpler: just set it to [admin_group.id]. Admin should have Admin group.
+            # Does Admin group include others? Yes via inheritance.
+            users[0].write({'groups_id': [admin_group[0].id]})
+            print("assigned admin to group")
         
     conn.commit()
     conn.close()
