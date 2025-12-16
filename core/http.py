@@ -6,6 +6,13 @@ import os
 import mimetypes
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlparse
+from datetime import datetime, date
+
+def json_default(obj):
+    """JSON serializer for objects not serializable by default json code"""
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError(f"Type {type(obj)} not serializable")
 
 # Global Routing Map
 # Path -> {handler, auth, regex, variables}
@@ -161,8 +168,8 @@ class Response:
             self.cookies[key]['httponly'] = True
 
     def render(self):
-        if isinstance(self.body, dict):
-            self.body = json.dumps(self.body)
+        if isinstance(self.body, dict) or isinstance(self.body, list):
+            self.body = json.dumps(self.body, default=json_default)
             self.content_type = 'application/json'
         
         if isinstance(self.body, bytes):

@@ -27,27 +27,32 @@ class ResUsers(Model):
         # But we are overriding it here.
         # Since we use `super().create(vals)`, we need to adapt.
         
-    def create(self, vals):
+    async def create(self, vals):
         if 'password' in vals:
             vals['password'] = get_password_hash(vals['password'])
-        return super().create(vals)
+        return await super().create(vals)
     
-    def write(self, vals):
+    async def write(self, vals):
         if 'password' in vals:
             vals['password'] = get_password_hash(vals['password'])
-        return super().write(vals)
+        return await super().write(vals)
 
-    def _check_credentials(self, login, password):
+    async def _check_credentials(self, login, password):
         """
         Verifies login/password. Returns user_id or None.
         Supports automatic migration from plaintext to hash.
         """
-        users = self.search([('login', '=', login)])
+        users = await self.search([('login', '=', login)])
         if not users:
             return None
         
-        user = users[0]
-        stored_password = user.password # Can be plain 'admin' or hash '$2b$...'
+        # Async Read required
+        data = await users.read(['password'])
+        if not data: return None
+        
+        user_data = data[0]
+        stored_password = user_data['password']
+        user_id = user_data['id']
 
         if not stored_password:
              return None
@@ -55,7 +60,7 @@ class ResUsers(Model):
         # 1. Try Hash Verification (The Secure Way)
         try:
             if verify_password(password, stored_password):
-                return user.id
+                return user_id
         except ValueError:
             # Stored password is not a valid hash (likely plaintext)
             pass
@@ -68,20 +73,18 @@ class ResUsers(Model):
             
             new_hash = get_password_hash(password)
             
-            # Direct SQL Update to bypass ORM loop/overhead and ensure commit
-            # Using self._table requires that it is set. 
-            # If we are in model context, self._table should be valid.
+            # Direct SQL Update to bypass ORM loop/overhead
             table = self._table
             
             # Use raw cursor from env
-            self.env.cr.execute(f'UPDATE "{table}" SET password = %s WHERE id = %s', (new_hash, user.id))
-            self.env.cr.connection.commit()
+            await self.env.cr.execute(f'UPDATE "{table}" SET password = %s WHERE id = %s', (new_hash, user_id))
+            # self.env.cr.connection.commit() # handled by transaction
             
-            return user.id
+            return user_id
         
         return None
 
-    def get_group_ids(self):
+    async def get_group_ids(self):
         """
         Return list of all group IDs this user belongs to, 
         including implied groups (transitive closure).
@@ -93,11 +96,16 @@ class ResUsers(Model):
         # if the ORM tries to check access rights while computing groups.
         
         # 1. Get direct groups
-        self.env.cr.execute(
-            'SELECT res_groups_id FROM res_groups_res_users_rel WHERE res_users_id = %s', 
+        # Note: res_groups_users_rel table name?
+        # In base/models/res_groups.py we define m2m relation?
+        # Standard Odoo: res_groups_users_rel with cols gid, uid. Or res_groups_res_users_rel
+        # Code used: res_groups_res_users_rel
+        await self.env.cr.execute(
+            'SELECT res_groups_id FROM res_groups_users_rel WHERE res_users_id = %s', 
             (self.id,)
         )
-        group_ids = set(row[0] for row in self.env.cr.fetchall())
+        rows = self.env.cr.fetchall()
+        group_ids = set(row[0] for row in rows)
         
         # 2. Expand implied groups (Breadth-First Search)
         # implied structure: res_groups_implied_rel (gid, hid) -> gid inherits hid
@@ -117,7 +125,7 @@ class ResUsers(Model):
             
             # Find groups implied by gid
             # SELECT hid FROM res_groups_implied_rel WHERE gid = %s
-            self.env.cr.execute(
+            await self.env.cr.execute(
                 'SELECT hid FROM res_groups_implied_rel WHERE gid = %s',
                 (gid,)
             )

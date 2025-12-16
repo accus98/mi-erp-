@@ -18,13 +18,17 @@ class Registry:
     def keys(cls):
         return cls._models.keys()
 
+    @classmethod
+    def __contains__(cls, item):
+        return item in cls._models
+
     @property
     @classmethod
     def models(cls):
         return cls._models
 
     @classmethod
-    def setup_models(cls, cr):
+    async def setup_models(cls, cr):
         """
         Synchronize Python models with Database (ir.model, ir.model.fields).
         """
@@ -41,8 +45,8 @@ class Registry:
             return
 
         # Explicitly init basic tables for these 2 essential models
-        IrModel._auto_init(cr)
-        IrFields._auto_init(cr)
+        await IrModel._auto_init(cr)
+        await IrFields._auto_init(cr)
         
         # 2. Sync Loop
         env = Environment(cr, uid=1) 
@@ -51,26 +55,28 @@ class Registry:
         for name, model_cls in cls._models.items():
             print(f"Init SQL for {name}")
             # Ensure Table Exists for all models
-            model_cls._auto_init(cr)
+            await model_cls._auto_init(cr)
             
             # --- Sync ir.model ---
             # Search if exists
-            existing = env['ir.model'].search([('model', '=', name)])
+            existing = await env['ir.model'].search([('model', '=', name)])
             if not existing:
-                env['ir.model'].create({
+                await env['ir.model'].create({
                     'name': model_cls._description or name,
                     'model': name,
                     'transient': False # TODO: Detect transient
                 })
                 # Commit or keep in transaction? Keep in txn.
-                # Get ID via search again or create returns record
-                model_record = env['ir.model'].search([('model', '=', name)])[0] # Lazy way
+                # Get ID via search again or create returns record (Async create returns RecordSet)
+                # But create returns proxy.
+                model_record_set = await env['ir.model'].search([('model', '=', name)], limit=1)
+                model_record = model_record_set[0]
             else:
                 model_record = existing[0]
 
             # --- Sync ir.model.fields ---
             for field_name, field_obj in model_cls._fields.items():
-                existing_field = env['ir.model.fields'].search([
+                existing_field = await env['ir.model.fields'].search([
                     ('model_id', '=', model_record.id),
                     ('name', '=', field_name)
                 ])
@@ -86,10 +92,27 @@ class Registry:
                 }
                 
                 if not existing_field:
-                    env['ir.model.fields'].create(vals)
+                    f_rec = await env['ir.model.fields'].create(vals)
                 else:
                     # Optional: Update if changed
-                    pass 
+                    f_rec = existing_field[0]
+                    # Update basic attrs?
+                    # await f_rec.write(vals) 
+                    pass
+                
+                # Sync Groups
+                if getattr(field_obj, 'groups', None):
+                    group_names = [g.strip() for g in field_obj.groups.split(',')]
+                    # Resolve Groups (By Name for now)
+                    # TODO: Support XML ID
+                    group_ids = []
+                    for g_name in group_names:
+                        gs = await env['res.groups'].search([('name', '=', g_name)])
+                        if gs:
+                            group_ids.append(gs[0].id)
+                    
+                    if group_ids:
+                        await f_rec.write({'groups_ids': group_ids}) 
         
-        cr.connection.commit()
+        # cr.connection.commit() # Handled by Caller
         print("Model Sync Complete.")

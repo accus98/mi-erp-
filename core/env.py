@@ -13,6 +13,10 @@ class Environment:
         self.cache = {}
         self._model_cache = {} # Cache for model classes/instances
 
+    @property
+    def registry(self):
+        return Registry
+
     def __getitem__(self, model_name):
         """
         env['res.partner'] returns an empty RecordSet for that model.
@@ -47,3 +51,17 @@ class Environment:
              return user.company_id
         # Fallback or initialization
         return self.get('res.company').browse([]) # Empty if not set
+        
+    async def prefetch_user(self):
+        """
+        Prefetch user and company data to ensure sync properties (env.user, env.company) 
+        work without triggering async cache miss errors.
+        """
+        user = self.user
+        # Fetch critical fields
+        # groups_id is needed for ACL. company_id for multi-company.
+        await user.read(['login', 'name', 'company_id', 'groups_id'])
+        
+        # Prefetch Company
+        if user.company_id:
+            await user.company_id.read(['name', 'currency_id'])

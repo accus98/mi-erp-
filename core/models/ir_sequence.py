@@ -17,7 +17,7 @@ class IrSequence(Model):
     use_date_range = Boolean(string='Use Date Range', default=False)
     date_range_ids = One2many('ir.sequence.date_range', inverse_name='sequence_id', string='Date Ranges')
     
-    def next_by_code(self, code):
+    async def next_by_code(self, code):
         """
         Get the next number for the given code.
         Supports multi-company and date ranges.
@@ -34,7 +34,7 @@ class IrSequence(Model):
         # But usually generic sequences serve all. 
         # If duplicated code for different companies, we pick 'company_id = user.company_id' if exists.
         
-        seqs = self.search(domain)
+        seqs = await self.search(domain)
         if not seqs:
             return None
         
@@ -64,7 +64,7 @@ class IrSequence(Model):
         # 3. Handle Date Ranges
         if seq.use_date_range:
             # Find range covering date_val
-            ranges = self.env['ir.sequence.date_range'].search([
+            ranges = await self.env['ir.sequence.date_range'].search([
                 ('sequence_id', '=', seq.id),
                 ('date_from', '<=', date_val),
                 ('date_to', '>=', date_val)
@@ -74,17 +74,17 @@ class IrSequence(Model):
                 dt_range = ranges[0]
                 number_next_actual = dt_range.number_next
                 # Update Range
-                dt_range.write({'number_next': dt_range.number_next + seq.number_increment})
+                await dt_range.write({'number_next': dt_range.number_next + seq.number_increment})
                 # No change to main sequence number_next
             else:
                  # No range found? Create one automatically? 
                  # Professional behavior: usually create if auto-create logic exists (e.g. yearly).
                  # For now, fallback to main sequence or error. Fallback to main.
                  number_next_actual = seq.number_next
-                 seq.write({'number_next': seq.number_next + seq.number_increment})
+                 await seq.write({'number_next': seq.number_next + seq.number_increment})
         else:
             number_next_actual = seq.number_next
-            seq.write({'number_next': seq.number_next + seq.number_increment})
+            await seq.write({'number_next': seq.number_next + seq.number_increment})
 
         # 4. Calculate Prefix
         prefix = seq.prefix or ''

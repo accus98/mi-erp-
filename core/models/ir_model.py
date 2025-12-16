@@ -1,5 +1,5 @@
 from core.orm import Model
-from core.fields import Char, Boolean, Many2one, Integer
+from core.fields import Char, Boolean, Many2one, Integer, Many2many
 
 class IrModel(Model):
     _name = 'ir.model'
@@ -22,3 +22,4 @@ class IrModelFields(Model):
     required = Boolean(string='Required')
     readonly = Boolean(string='Readonly')
     string = Char(string='Label')
+    groups_ids = Many2many('res.groups', string='Restricted Groups', relation='ir_model_fields_group_rel')

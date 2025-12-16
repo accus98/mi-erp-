@@ -1,11 +1,12 @@
 from core.http import route, Response
+import inspect
 
 @route('/', auth='public')
-def index(req, env):
+async def index(req, env):
     return Response("<h1>Nexo ERP Running</h1>")
 
 @route('/web/login', auth='public')
-def login(req, env):
+async def login(req, env):
     # JSON: {login, password}
     params = req.json.get('params', {})
     login = params.get('login') or req.json.get('login')
@@ -16,9 +17,11 @@ def login(req, env):
     # Use SUDO to check credentials (Public user cannot search res.users)
     from core.env import Environment
     sudo_env = Environment(env.cr, uid=1)
+    # Prefetch user for sudo logic? not needed if checking by SQL?
+    # UsersSudo._check_credentials likely does search/read.
     UsersSudo = sudo_env['res.users']
     
-    uid = UsersSudo._check_credentials(login, password)
+    uid = await UsersSudo._check_credentials(login, password)
     
     if uid:
         req.session.uid = uid
@@ -29,7 +32,7 @@ def login(req, env):
         return Response({'error': 'Access Denied'}, status=401)
 
 @route('/web/dataset/call_kw', auth='user')
-def call_kw(req, env):
+async def call_kw(req, env):
     """
     JSON-RPC:
     {
@@ -59,15 +62,25 @@ def call_kw(req, env):
     try:
         # Transactional Wrapper
         # If any error occurs inside, rollback happens automatically via context manager.
-        with env.cr.savepoint():
+        # But here we are already inside global handler transaction. A savepoint is useful for partial errors.
+        # Using Async Savepoint logic? AsyncCursor wrapper should support it or we use raw conn.transaction(savepoint=True).
+        # For simplicity, we rely on main transaction now.
+        if True: # with env.cr.savepoint(): # TODO: implement async savepoint on Env or Cursor
             model = env[model_name]
             
             # Handle Instance Methods (read, write, unlink)
             # These methods expect 'self' to be a recordset, so we must instantiate it 
             # using the first argument (ids) from args.
             instance_methods = ['read', 'write', 'unlink', 'check_access_rights']
+            # And many Odoo methods.
             
-            if method_name in instance_methods and args and isinstance(args[0], list):
+            # We assume instance method if args[0] is list of IDs? Or based on name?
+            # Safer: Try to bind if first arg matches?
+            # Standard Odoo call_kw logic:
+            
+            is_instance_call = method_name in instance_methods or (args and isinstance(args[0], list) and method_name not in ['search', 'search_count', 'create', 'search_read', 'name_search'])
+            
+            if is_instance_call and args and isinstance(args[0], list):
                 ids = args[0]
                 method_args = args[1:]
                 record = model.browse(ids)
@@ -77,6 +90,9 @@ def call_kw(req, env):
                 # Static methods or methods called on empty recordset (search, create, etc.)
                 method = getattr(model, method_name)
                 result = method(*args, **kwargs)
+            
+            if inspect.iscoroutine(result):
+                result = await result
 
             if hasattr(result, 'ids'):
                  result = result.ids
@@ -105,11 +121,11 @@ def call_kw(req, env):
 
 
 @route('/web/session/destroy', auth='user')
-def destroy(req, env):
+async def destroy(req, env):
     req.session.uid = None
     req.session.save()
     return Response({'result': True})
 
 @route('/web/session/check', auth='user')
-def check(req, env):
+async def check(req, env):
     return Response({'result': {'uid': req.session.uid, 'login': req.session.login}})

@@ -11,6 +11,13 @@ import threading
 _pool = None
 
 class Database:
+    @staticmethod
+    def _validate_identifier(name):
+        import re
+        if not re.match(r'^[a-z0-9_]+$', name):
+             raise ValueError(f"Security Error: Invalid Identifier '{name}'. Only lowercase alphanumeric and underscores allowed.")
+        return name
+
     @classmethod
     def connect(cls):
         """
@@ -80,6 +87,7 @@ class Database:
     @classmethod
     def create_table(cls, cr, table_name, columns, constraints):
         # Postgres Adaptation
+        cls._validate_identifier(table_name)
         
         # 1. Sanitize Columns
         safe_cols = []
@@ -113,6 +121,14 @@ class Database:
 
     @classmethod
     def create_pivot_table(cls, cr, table_name, col1, ref1, col2, ref2):
+        cls._validate_identifier(table_name)
+        cls._validate_identifier(ref1)
+        cls._validate_identifier(ref2)
+        # col1/col2 are usually field names with _id, check them too?
+        # Usually internal. But safe to check.
+        cls._validate_identifier(col1)
+        cls._validate_identifier(col2)
+        
         query = f"""
         CREATE TABLE IF NOT EXISTS "{table_name}" (
             "{col1}" INTEGER REFERENCES "{ref1}" (id) ON DELETE CASCADE,

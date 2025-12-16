@@ -29,16 +29,16 @@ class SaleOrder(Model):
             total += (line.product_uom_qty or 0.0) * (line.price_unit or 0.0)
         self.amount_total = total
 
-    def create(self, vals):
+    async def create(self, vals):
         if vals.get('name', 'New') == 'New':
             # Use Sequence
-            seq = self.env['ir.sequence'].next_by_code('sale.order') or 'New'
+            seq = await self.env['ir.sequence'].next_by_code('sale.order') or 'New'
             vals['name'] = seq
             
-        return super().create(vals)
+        return await super().create(vals)
 
-    def action_confirm(self):
-        self.write({'state': 'confirm'})
+    async def action_confirm(self):
+        await self.write({'state': 'confirm'})
 
 class SaleOrderLine(Model):
     _name = 'sale.order.line'

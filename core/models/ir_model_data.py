@@ -12,18 +12,16 @@ class IrModelData(Model):
     res_id = Integer(string='Record ID', required=True) # e.g. 5
     
     @classmethod
-    def _auto_init(cls, cr):
-        super()._auto_init(cr)
+    async def _auto_init(cls, cr):
+        await super()._auto_init(cr)
         # Unique Constraint
-        # Unique Constraint adaptation for SQLite
-        # Use Index instead of ALTER TABLE ADD CONSTRAINT (not supported well in SQLite)
+        # Unique Constraint adaptation for SQLite/Postgres
         index_name = "ir_model_data_module_name_uniq"
         q = f'CREATE UNIQUE INDEX IF NOT EXISTS "{index_name}" ON "ir_model_data" ("module", "name")'
         try:
-            cr.execute(q)
+            await cr.execute(q)
         except Exception as e:
             print(f"Warning: Failed to create index {index_name}: {e}")
-            # Do NOT rollback entire transaction!
             pass
     
     def _xmlid_lookup(self, module, xml_id):

@@ -7,3 +7,7 @@ jinja2
 aiofiles
 python-jose
 passlib[bcrypt]
+asyncpg
+alembic
+sqlalchemy
+redis

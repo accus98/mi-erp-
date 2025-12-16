@@ -2,6 +2,7 @@ import os
 import mimetypes
 from fastapi import FastAPI, Request, Response, APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import uvicorn
@@ -9,22 +10,37 @@ import re
 import uuid
 
 # Import original http to get ROUTES and Session logic
-from core.http import ROUTES, Session, Response as NexusResponse
+from core.http import ROUTES, Response as NexusResponse
+from core.cache import Cache
 
 # Import middleware/deps
-from core.db import Database
+from core.db_async import AsyncDatabase
 from core.env import Environment
+from core.api.router import api_router
 
 # --- Module Loading Logic ---
 def load_modules():
     print("Loading Modules...")
     import sys
+    import importlib
     
     # 1. Core Controllers
     import core.controllers.main
     import core.controllers.binary
     
-    # 2. Addons Loading
+    # 2. Core Models (Explicitly load introspection models)
+    models_path = os.path.join(os.getcwd(), 'core', 'models')
+    if os.path.exists(models_path):
+        for item in os.listdir(models_path):
+            if item.endswith('.py') and not item.startswith('__'):
+                mod_name = item[:-3]
+                try:
+                    importlib.import_module(f"core.models.{mod_name}")
+                    print(f"Loaded core model: {mod_name}")
+                except Exception as e:
+                    print(f"Failed to load core model {mod_name}: {e}")
+
+    # 3. Addons Loading
     addons_path = os.path.join(os.getcwd(), 'addons')
     if os.path.exists(addons_path) and os.path.isdir(addons_path):
         sys.path.append(addons_path)
@@ -51,12 +67,59 @@ load_modules()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Open DB Pool
-    # Database.connect() # logic in db.py handles pool init on first connect
+    await AsyncDatabase.initialize()
     yield
     # Shutdown: Close Pool
-    Database.close_all()
+    await AsyncDatabase.close()
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.include_router(api_router)
+
+# Async Session Logic
+class Session:
+    def __init__(self, sid):
+        self.sid = sid
+        self.uid = None
+        self.login = None
+        self.context = {}
+        self._dirty = False # Not used in Redis impl, but kept for compat
+        
+    @classmethod
+    def new(cls):
+        sid = str(uuid.uuid4())
+        sess = cls(sid)
+        # Don't save empty immediately? Or yes to establish cookie.
+        sess.save()
+        return sess
+
+    @classmethod
+    def load(cls, sid):
+        print(f"DEBUG_SESSION: Loading {sid}")
+        data = Cache.get(f"session:{sid}")
+        print(f"DEBUG_SESSION: Data for {sid}: {data}")
+        if data:
+            sess = cls(sid)
+            sess.uid = data.get('uid')
+            sess.login = data.get('login')
+            sess.context = data.get('context', {})
+            return sess
+        return None
+
+    def save(self):
+        data = {
+            'uid': self.uid,
+            'login': self.login,
+            'context': self.context
+        }
+        # TTL 1 day
+        Cache.set(f"session:{self.sid}", data, ttl=86400)
 
 # Adapter for Nexus Request
 class NexusRequest:
@@ -77,11 +140,13 @@ class NexusRequest:
 # Dependency for Session
 async def get_session(request: Request):
     sid = request.cookies.get('session_id')
+    print(f"DEBUG_SESSION: Middleware Cookie SID: {sid}")
     session = None
     if sid:
         session = Session.load(sid)
     
     if not session:
+        print("DEBUG_SESSION: Creating NEW Session")
         session = Session.new()
     
     # Check Lang from Cookie if not in context
@@ -118,53 +183,65 @@ for path, info in ROUTES.items():
             if auth == 'user' and not session.uid:
                  return JSONResponse(status_code=403, content={"error": "Login Required"})
 
-            # DB Connection
-            conn = Database.connect()
+            # Async DB Connection (Transaction Managed by acquire context)
             try:
-                cr = Database.cursor(conn)
-                uid = session.uid
-                env = Environment(cr, uid=uid, context=session.context)
-                
-                # Prepare Nexus Request
-                params = request.path_params
-                nx_req = NexusRequest(request, session, params)
-                await nx_req.load_body()
-                
-                # Call Original Controller
-                # Original controllers are sync functions usually
-                # FastAPI runs them in threadpool if not async def
-                nx_resp = func(nx_req, env)
-                
-                conn.commit()
-                
-                # Convert Response
-                if isinstance(nx_resp, NexusResponse):
-                    # headers
-                    for k, v in nx_resp.headers.items():
-                        response.headers[k] = v
-                    # cookies
-                    for k, v in nx_resp.cookies.items():
-                        # SimpleCookie to Starlette logic
-                        # Simplified:
-                         response.set_cookie(key=k, value=v.value, httponly=v['httponly'], path=v['path'])
+                # acquire() yields a cursor inside a transaction.
+                # If we exit block without error -> Commit. 
+                # If we raise exception -> Rollback.
+                async with AsyncDatabase.acquire() as cr:
+                    uid = session.uid
+                    env = Environment(cr, uid=uid, context=session.context)
                     
-                    # session cookie
-                    response.set_cookie('session_id', session.sid, httponly=True)
+                    # Async Prefetch to support Sync Properties (env.user, env.company) in Controllers
+                    if uid:
+                        await env.prefetch_user()
                     
-                    return Response(content=nx_resp.render(), status_code=nx_resp.status, media_type=nx_resp.content_type)
-                elif isinstance(nx_resp, (dict, list)):
-                     return JSONResponse(content=nx_resp)
-                else:
-                     return HTMLResponse(content=str(nx_resp))
+                    # Prepare Nexus Request
+                    params = request.path_params
+                    nx_req = NexusRequest(request, session, params)
+                    await nx_req.load_body()
+                    
+                    # Call Controller
+                    # Controllers can be sync (old) or async (new).
+                    import inspect
+                    if inspect.iscoroutinefunction(func):
+                        nx_resp = await func(nx_req, env)
+                    else:
+                        # Fallback for legacy sync controllers that DO NOT use ORM logic?
+                        # If a sync controller uses ORM, it will crash.
+                        print(f"WARNING: Sync Controller called: {func.__name__}. Migration Required.")
+                        nx_resp = func(nx_req, env)
+                        if inspect.iscoroutine(nx_resp):
+                             nx_resp = await nx_resp
+                    
+                    # Convert Response
+                    # Convert Response
+                    if isinstance(nx_resp, NexusResponse):
+                        final_response = Response(content=nx_resp.render(), status_code=nx_resp.status, media_type=nx_resp.content_type)
+                        
+                        # headers
+                        for k, v in nx_resp.headers.items():
+                            final_response.headers[k] = v
+                        # cookies
+                        for k, v in nx_resp.cookies.items():
+                             final_response.set_cookie(key=k, value=v.value, httponly=v['httponly'], path=v['path'])
+                        
+                        # session cookie
+                        # Ensure samesite='lax' for localhost dev
+                        final_response.set_cookie('session_id', session.sid, httponly=True, samesite='lax')
+                        
+                        return final_response
+                    elif isinstance(nx_resp, (dict, list)):
+                         return JSONResponse(content=nx_resp)
+                    else:
+                         return HTMLResponse(content=str(nx_resp))
 
             except Exception as e:
-                conn.rollback()
+                # Transaction Rolled back by async with block exit
                 print(f"Error: {e}")
                 import traceback
                 traceback.print_exc()
                 return JSONResponse(status_code=500, content={"error": str(e)})
-            finally:
-                Database.release(conn)
         return handler
 
     # Register with supporting methods (GET/POST)

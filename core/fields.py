@@ -7,7 +7,7 @@ class Field:
     _type = None
     _sql_type = None
 
-    def __init__(self, string=None, required=False, help=None, readonly=False, compute=None, store=True, default=None, translate=False):
+    def __init__(self, string=None, required=False, help=None, readonly=False, compute=None, store=True, default=None, translate=False, groups=None):
         self.string = string
         self.required = required
         self.help = help
@@ -17,6 +17,7 @@ class Field:
         self.store = store
         self.default = default
         self.translate = translate
+        self.groups = groups
         
         if compute and not store:
             self.store = False
@@ -31,40 +32,31 @@ class Field:
         
         record.ensure_one()
         id_val = record.ids[0]
+        
+        # Optimization: 'id' field is always available sync
+        if self.name == 'id':
+            return id_val
+            
         key = (record._name, id_val, self.name)
         
-        # Translation Logic
+        # Translation Cache Check
         lang = record.env.context.get('lang')
         if getattr(self, 'translate', False) and lang and lang != 'en_US':
              key_trans = (record._name, id_val, self.name, lang)
              if key_trans in record.env.cache:
                  return record.env.cache[key_trans]
-             
-             # Fetch Translation
-             trans = record.env['ir.translation'].search([
-                 ('name', '=', f"{record._name},{self.name}"),
-                 ('res_id', '=', id_val),
-                 ('lang', '=', lang)
-             ], limit=1)
-             
-             if trans:
-                 val = trans[0].value
-                 record.env.cache[key_trans] = val
-                 return val
-             else:
-                 # Fallback to source (handled below)
-                 pass
+             # Cannot fetch translation sync.
+             raise RuntimeError(f"AsyncORM: Translation for field '{self.name}' not in cache. Use await record.read() with lang='{lang}' context.")
 
         if key in record.env.cache:
             return record.env.cache[key]
         
+        # Computed Field - Cannot execute Sync
         if self.compute:
-            method = getattr(record, self.compute)
-            method() 
-            return record.env.cache.get(key)
+             raise RuntimeError(f"AsyncORM: Computed field '{self.name}' not in cache. Usage of sync access is forbidden. Call compute method or read().")
 
-        record._fetch_fields([self.name])
-        return record.env.cache.get(key)
+        # Stored Field - Cannot execute Sync
+        raise RuntimeError(f"AsyncORM: Field '{self.name}' not in cache. Use await record.read(['{self.name}']) or await record.fetch(['{self.name}']).")
     
     def __set__(self, record, value):
         if record is None: return
