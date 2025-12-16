@@ -43,7 +43,7 @@ class IrSequence(Model):
             pass # Keep raw if format fails
             
         # 2. Format Number
-        number = str(seq.number_next).zfill(seq.padding)
+        number = str(seq.number_next).zfill(int(seq.padding))
         
         # 3. Update DB
         # Use SQL update to avoid concurrency issues ideally, but ORM write is okay for MVP

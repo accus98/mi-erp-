@@ -6,7 +6,8 @@ export const useMenuStore = defineStore('menu', {
         menus: [],     // All menus (tree)
         currentApp: null, // Active App (e.g., Sales)
         currentAction: null,
-        loading: false
+        loading: false,
+        error: null // Debug Error
     }),
 
     getters: {
@@ -19,11 +20,15 @@ export const useMenuStore = defineStore('menu', {
     actions: {
         async fetchMenus() {
             this.loading = true
+            this.error = null
+            console.log("Fetching Menus (Start)...");
             try {
                 const result = await rpc.call('ir.ui.menu', 'load_menus', [])
+                console.log("Menus Loaded: " + (result ? result.length : 'null'));
                 this.menus = result
             } catch (error) {
                 console.error("Error loading menus:", error)
+                this.error = error.message || error.toString();
             } finally {
                 this.loading = false
             }

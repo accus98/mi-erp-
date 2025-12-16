@@ -88,17 +88,35 @@ class ModuleLoader:
             # Update/Create IrModule
             ModModel = env['ir.module.module']
             existing = ModModel.search([('name', '=', mod_name)])
+            
+            old_version = False
+            new_version = manifest.get('version', '1.0.0')
+            
             if not existing:
                 ModModel.create({
                     'name': mod_name,
-                    'state': 'installed', # Assuming auto-install for now
-                    'version': manifest.get('version'),
+                    'state': 'installed',
+                    'version': new_version,
                     'summary': manifest.get('summary'),
                     'author': manifest.get('author'),
                     'dependencies': str(manifest.get('depends'))
                 })
             else:
-                existing[0].write({'state': 'installed'})
+                old_version = existing[0].version
+                existing[0].write({
+                    'state': 'installed',
+                    'version': new_version, 
+                    'summary': manifest.get('summary')
+                })
+
+            # Migration (Schema Upgrades)
+            # Run BEFORE Code Import? OR AFTER?
+            # Standard: Code Import (define new models) -> Auto Init -> Migration Scripts (Data)
+            # But sometimes we need Pre-Migration to prepare schema?
+            # MigrationManager handles "migrations/version/pre.py" if we want.
+            # For now, we put it here (Before import? No, usually after import so classes exist).
+            
+            # Let's import code first (to update python classes), then run migrations.
 
             # Custom Models Import
             # "import addons.mod_name"
@@ -126,11 +144,20 @@ class ModuleLoader:
             # Load Data (XML)
             data_files = manifest.get('data', [])
             for df in data_files:
-                file_path = os.path.join(addons_path, mod_name, df)
                 if os.path.exists(file_path):
                     try:
                         xml_loader.load_file(file_path, module=mod_name)
                     except Exception as e:
                         print(f"Failed to load XML {df}: {e}")
             
+            # Run Migrations (Post-Update)
+            if old_version and old_version != new_version:
+                 from core.migration import MigrationManager
+                 try:
+                     MigrationManager.run_migrations(env, mod_name, old_version, new_version, addons_path)
+                 except Exception as e:
+                     print(f"Migration Failed for {mod_name}: {e}")
+                     # Do we abort? Ideally yes.
+                     pass
+
             print(f"Module {mod_name} Loaded.")

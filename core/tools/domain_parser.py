@@ -161,11 +161,11 @@ class DomainParser:
                          # Handle empty list: id in [] -> False
                          stack.append("0=1") 
                     else:
-                        placeholders = ", ".join(["?"] * len(value))
+                        placeholders = ", ".join(["%s"] * len(value))
                         stack.append(f'"{field}" {operator} ({placeholders})')
                         params.extend(value)
                 else:
-                    stack.append(f'"{field}" {operator} ?')
+                    stack.append(f'"{field}" {operator} %s')
                     params.append(value)
                 
         # Params Issue:

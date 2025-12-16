@@ -27,7 +27,8 @@ class Field:
     def __get__(self, record, owner):
         if record is None: return self
         if not record.ids: return None
-
+        
+        record.ensure_one()
         id_val = record.ids[0]
         key = (record._name, id_val, self.name)
         
@@ -45,6 +46,7 @@ class Field:
     def __set__(self, record, value):
         if record is None: return
         if not record.ids: return
+        # record.ensure_one() # Write handles multiple records!
         if self.store and not self.compute: 
              record.write({self.name: value})
 
@@ -94,6 +96,7 @@ class Many2one(Field):
 
     def __get__(self, record, owner):
         if record is None: return self
+        # Super __get__ calls ensure_one
         val_id = super().__get__(record, owner)
         if not val_id:
              return record.env[self.comodel_name].browse([])
@@ -111,8 +114,8 @@ class One2many(Field):
     
     def __get__(self, record, owner):
         if record is None or not record.ids: return []
-        id_val = record.ids[0]
-        return record.env[self.comodel_name].search([(self.inverse_name, '=', id_val)])
+        record.ensure_one()
+        return record.env[self.comodel_name].search([(self.inverse_name, '=', record.ids[0])])
 
 class Many2many(Field):
     _type = 'many2many'
@@ -128,15 +131,14 @@ class Many2many(Field):
     
     def __get__(self, record, owner):
         if record is None or not record.ids: return []
+        record.ensure_one()
         
         # Assumption: relation is populated by MetaModel (or user) before runtime usage.
         if not self.relation:
              return []
 
-        id_val = record.ids[0]
-        
         query = f'SELECT "{self.column2}" FROM "{self.relation}" WHERE "{self.column1}" = %s'
-        record.env.cr.execute(query, (id_val,))
+        record.env.cr.execute(query, (record.ids[0],))
         res_ids = [r[0] for r in record.env.cr.fetchall()]
         
         return record.env[self.comodel_name].browse(res_ids)
@@ -149,6 +151,7 @@ class Binary(Field):
         if record is None: return self
         if not record.ids: return None
 
+        record.ensure_one()
         # Check cache
         key = (record._name, record.ids[0], self.name)
         if key in record.env.cache:

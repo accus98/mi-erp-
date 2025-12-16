@@ -61,9 +61,11 @@ class Model(metaclass=MetaModel):
     _description = None
     _rec_name = 'name' # Default record name field
 
-    def __init__(self, env, ids=()):
+    def __init__(self, env, ids=(), prefetch_ids=None):
         self.env = env
         self.ids = tuple(ids)
+        self._prefetch_ids = prefetch_ids if prefetch_ids is not None else set(self.ids)
+        self._prefetch_ids.update(self.ids)
 
     def __iter__(self):
         for id_val in self.ids:
@@ -83,33 +85,46 @@ class Model(metaclass=MetaModel):
         return self._name == other._name and set(self.ids) == set(other.ids)
 
     def __getitem__(self, index):
-        # Supports records[0] or records[1:3]
         ids = self.ids[index]
         if isinstance(ids, int):
             ids = [ids]
         return self.browse(ids)
 
-    def get_view_info(self, view_type='tree'):
+    def ensure_one(self):
+        if len(self.ids) != 1:
+            raise ValueError(f"Expected singleton: {self._name}({self.ids})")
+        return self
+
+    def filtered(self, func):
         """
-        Returns view metadata and fields.
-        MVP: Returns hardcoded fields for tree view.
+        Return filtered recordset.
+        func: lambda rec: rec.age > 10
         """
-        if view_type == 'tree':
-            field_names = ['name', 'create_date']
-            fields_info = {}
-            for fname in field_names:
-                if fname in self._fields:
-                    fields_info[fname] = {
-                        'string': self._fields[fname].string or fname.capitalize(),
-                        'type': self._fields[fname].type
-                    }
-            return {'type': 'tree', 'fields': fields_info}
-        
-        elif view_type == 'form':
-            # For form, return all fields
-            return {'type': 'form', 'fields': self.fields_get()}
-            
-        return {'type': view_type, 'fields': {}}
+        ids = [rec.id for rec in self if func(rec)]
+        return self.browse(ids)
+
+    def mapped(self, field_name):
+        """
+        Return list of values.
+        If field is relational, return recordset.
+        """
+        res = []
+        for rec in self:
+            # TODO: Improve vectorization here?
+            # Accessing rec.field triggers fetch.
+            # If fetch uses prefetch_ids, this is efficient.
+            val = getattr(rec, field_name)
+            res.append(val)
+        return res
+
+    def browse(self, ids):
+        if isinstance(ids, int): ids = [ids]
+        return self.env.get(self._name)._with_ids(ids, self._prefetch_ids)
+
+    def _with_ids(self, ids, prefetch_ids=None):
+        return self.__class__(self.env, tuple(ids), prefetch_ids)
+
+
 
     
     def check_access_rights(self, operation):
@@ -137,7 +152,7 @@ class Model(metaclass=MetaModel):
         query = f"""
             SELECT 1 FROM ir_model_access a 
             JOIN ir_model m ON a.model_id = m.id
-            WHERE m.model = ? AND a.{col} = TRUE
+            WHERE m.model = %s AND a.{col} = TRUE
             LIMIT 1
         """
         cr.execute(query, (self._name,))
@@ -171,13 +186,6 @@ class Model(metaclass=MetaModel):
                         defaults[fname] = val
         return defaults
 
-    def browse(self, ids):
-        if isinstance(ids, int): ids = [ids]
-        return self.env.get(self._name)._with_ids(ids)
-
-    def _with_ids(self, ids):
-        return self.__class__(self.env, tuple(ids))
-
     
     def _apply_ir_rules(self, operation='read'):
         """
@@ -202,7 +210,7 @@ class Model(metaclass=MetaModel):
         query = f"""
             SELECT r.domain_force FROM ir_rule r
             JOIN ir_model m ON r.model_id = m.id
-            WHERE m.model = ? AND r.active = True AND r.{col} = True
+            WHERE m.model = %s AND r.active = True AND r.{col} = True
         """
         self.env.cr.execute(query, (self._name,))
         rows = self.env.cr.fetchall()
@@ -279,15 +287,48 @@ class Model(metaclass=MetaModel):
         if offset:
             query += f" OFFSET {offset}"
         
+        # DEBUG TRACE
+        print(f"DEBUG_TRACE: search SQL: {query} | Params: {where_params}", flush=True)
+
         self.env.cr.execute(query, tuple(where_params))
         res_ids = [r[0] for r in self.env.cr.fetchall()]
+        
+        # DEBUG TRACE
+        print(f"DEBUG_TRACE: search Found {len(res_ids)} records for {self._name}", flush=True)
+
         return self.browse(res_ids)
+
+    def check_access_rule(self, operation):
+        """
+        Verifies that the current records satisfy the Record Rules.
+        Raises AccessError if any record is forbidden.
+        """
+        if self.env.uid == 1: return
+        if not self.ids: return
+        
+        rule_clause, rule_params = self._apply_ir_rules(operation)
+        if not rule_clause: return
+        
+        # Verify all IDs match the rule
+        ids_list = list(self.ids)
+        placeholders = ", ".join(["%s"] * len(ids_list))
+        
+        # We need to count how many of the requested IDs match the rule
+        query = f'SELECT COUNT(*) FROM "{self._table}" WHERE id IN ({placeholders}) AND ({rule_clause})'
+        params = tuple(ids_list) + tuple(rule_params)
+        
+        self.env.cr.execute(query, params)
+        matched_count = self.env.cr.fetchone()[0]
+        
+        if matched_count != len(self.ids):
+             raise Exception(f"Access Rule Violation: One or more records in {self._name} are restricted for operation '{operation}'.")
 
     def read(self, fields=None):
         """
         Serializes records to a list of dictionaries.
         """
         self.check_access_rights('read')
+        self.check_access_rule('read')
         if not self.ids: return []
         
         res = []
@@ -337,6 +378,7 @@ class Model(metaclass=MetaModel):
         Process O2M commands:
         (0, 0, vals) -> Create
         (1, id, vals) -> Write
+        (2, id) -> Delete (Unlink)
         (4, id, _) -> Link
         (6, 0, [ids]) -> Set Link
         """
@@ -355,6 +397,9 @@ class Model(metaclass=MetaModel):
                 res_id = cmd[1]
                 vals = cmd[2]
                 Comodel.browse([res_id]).write(vals)
+            elif op == 2: # Delete
+                res_id = cmd[1]
+                Comodel.browse([res_id]).unlink()
             elif op == 4: # Link
                 res_id = cmd[1]
                 Comodel.browse([res_id]).write({field.inverse_name: record.id})
@@ -366,8 +411,39 @@ class Model(metaclass=MetaModel):
                 # Link new
                 Comodel.browse(ids).write({field.inverse_name: record.id})
 
+    def onchange(self, vals, field_name, field_onchange):
+        """
+        Simulate onchange in memory.
+        vals: Current form values (including O2M commands as list of tuples)
+        """
+        snapshot = Snapshot(self, vals)
+        
+        method_name = field_onchange.get(field_name)
+        if method_name:
+            # Re-bind method to snapshot so 'self' inside method refers to snapshot
+            # 1. Get unbound function
+            func = getattr(self.__class__, method_name)
+            # 2. Bind to snapshot
+            method = func.__get__(snapshot, self.__class__)
+            
+            method()
+            
+            # Collect changes
+            changes = {}
+            for k in snapshot._changed:
+                changes[k] = snapshot._values[k]
+            return {'value': changes}
+            
+        return {}
+
+
+
     def create(self, vals):
         self.check_access_rights('create')
+        # Create does not check record rules because record doesn't exist yet.
+        # But if we limit creation based on properties? 
+        # Odoo checks rule AFTER creation usually (can_create logic).
+        # We skip for now.
         
         # Handle defaults
         for fname, field in self._fields.items():
@@ -398,19 +474,15 @@ class Model(metaclass=MetaModel):
 
         valid_cols = [k for k in vals if k in self._fields and self._fields[k]._sql_type]
         cols_sql = ", ".join([f'"{k}"' for k in valid_cols])
-        placeholders = ", ".join(["?"] * len(valid_cols))
+        placeholders = ", ".join(["%s"] * len(valid_cols))
         values = [vals[k] for k in valid_cols]
 
-        query = f'INSERT INTO "{self._table}" ({cols_sql}) VALUES ({placeholders})'
+        query = f'INSERT INTO "{self._table}" ({cols_sql}) VALUES ({placeholders}) RETURNING id'
         self.env.cr.execute(query, tuple(values))
         
-        # Try attribute first
-        new_id = self.env.cr.lastrowid
-        if not new_id:
-            # Fallback to query
-            self.env.cr.execute("SELECT last_insert_rowid()")
-            res = self.env.cr.fetchone()
-            new_id = res[0] if res else None
+        # Postgres returns the ID
+        res = self.env.cr.fetchone()
+        new_id = res[0] if res else None
         
         for k, v in vals.items():
             self.env.cache[(self._name, new_id, k)] = v
@@ -433,6 +505,7 @@ class Model(metaclass=MetaModel):
 
     def write(self, vals):
         self.check_access_rights('write')
+        self.check_access_rule('write')
         if not self.ids: return True
         
         m2m_values = {}
@@ -453,11 +526,11 @@ class Model(metaclass=MetaModel):
         valid_cols = [k for k in vals if k in self._fields and self._fields[k]._sql_type]
         
         if valid_cols:
-            set_clause = ", ".join([f'"{k}" = ?' for k in valid_cols])
+            set_clause = ", ".join([f'"{k}" = %s' for k in valid_cols])
             values = [vals[k] for k in valid_cols]
             
             ids_list = list(self.ids)
-            id_placeholders = ", ".join(["?"] * len(ids_list))
+            id_placeholders = ", ".join(["%s"] * len(ids_list))
             values.extend(ids_list)
 
             query = f'UPDATE "{self._table}" SET {set_clause} WHERE id IN ({id_placeholders})'
@@ -534,9 +607,10 @@ class Model(metaclass=MetaModel):
 
     def unlink(self):
         self.check_access_rights('unlink')
+        self.check_access_rule('unlink')
         if not self.ids: return True
         ids_list = list(self.ids)
-        placeholders = ", ".join(["?"] * len(ids_list))
+        placeholders = ", ".join(["%s"] * len(ids_list))
         query = f'DELETE FROM "{self._table}" WHERE id IN ({placeholders})'
         self.env.cr.execute(query, tuple(ids_list))
         return True
@@ -639,8 +713,27 @@ class Model(metaclass=MetaModel):
 
     def _fetch_fields(self, field_names):
         if not self.ids: return
-        ids_list = list(self.ids)
-        placeholders = ", ".join(["?"] * len(ids_list))
+        
+        # Prefetch Optimization (Vectorization)
+        to_fetch = set(self.ids)
+        if self._prefetch_ids:
+            to_fetch.update(self._prefetch_ids)
+            
+        # Only fetch records that are missing at least one requested field
+        final_ids = []
+        for id_val in to_fetch:
+            missing = False
+            for fname in field_names:
+                if (self._name, id_val, fname) not in self.env.cache:
+                    missing = True
+                    break
+            if missing:
+                final_ids.append(id_val)
+                
+        if not final_ids: return
+
+        ids_list = list(final_ids)
+        placeholders = ", ".join(["%s"] * len(ids_list))
         query = f'SELECT id, {", ".join(field_names)} FROM "{self._table}" WHERE id IN ({placeholders})'
         self.env.cr.execute(query, tuple(ids_list))
         rows = self.env.cr.fetchall()
@@ -696,7 +789,63 @@ class TransientModel(Model):
         from datetime import timedelta
         cutoff = datetime.now() - timedelta(hours=age_hours)
         
-        query = f'DELETE FROM "{self._table}" WHERE create_date < ?'
+        query = f'DELETE FROM "{self._table}" WHERE create_date < %s'
         self.env.cr.execute(query, (cutoff,))
         print(f"Vacuum cleaned {self._name}")
 
+
+class Snapshot:
+    def __init__(self, record, vals):
+        self._record = record
+        self._values = vals.copy()
+        self._changed = set()
+        self.env = record.env # Copy env
+        self.id = vals.get('id') or None # Virtual ID?
+        
+    def __getattr__(self, name):
+        # 1. Check local values
+        if name in self._values:
+            val = self._values[name]
+            # Handle O2M commands -> RecordSet-like object
+            if self._record._fields[name]._type == 'one2many':
+                return self._resolve_o2m_commands(name, val)
+            return val
+            
+        # 2. Delegate to real record (Method or Field lookup)
+        # Even if record is empty, we want to access methods.
+        return getattr(self._record, name)
+        
+    def __setattr__(self, name, value):
+        if name.startswith('_') or name in ('id', 'env'):
+            super().__setattr__(name, value)
+            return
+            
+        self._values[name] = value
+        self._changed.add(name)
+
+    def _resolve_o2m_commands(self, field_name, commands):
+        # Convert commands to a list of Snapshot objects (virtual records)
+        # (0, 0, vals) -> New snapshot
+        # (1, id, vals) -> Browse(id) merged with vals
+        # (2, id) -> Exclude
+        # (4, id) -> Browse(id)
+        
+        Comodel = self.env[self._record._fields[field_name].comodel_name]
+        records = []
+        
+        for cmd in commands:
+            op = cmd[0]
+            if op == 0: # New
+               records.append(Snapshot(Comodel.browse([]), cmd[2]))
+            elif op == 1: # Update existing
+               real = Comodel.browse([cmd[1]])
+               # We need to merge real + new vals
+               # Complex: we need a Snapshot that falls back to real
+               # But for now, let's just use vals for calculation if sufficient
+               # Or create a Snapshot wrapping real record with overlay vals
+               records.append(Snapshot(real, cmd[2])) 
+            elif op == 4: # Link
+               records.append(Snapshot(Comodel.browse([cmd[1]]), {}))
+            # op 2 (delete) -> Do nothing (skip)
+        
+        return records

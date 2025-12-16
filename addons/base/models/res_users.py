@@ -1,8 +1,8 @@
 from core.orm import Model
 from core.fields import Char, Many2one
-from passlib.context import CryptContext
-
-pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+from core.orm import Model
+from core.fields import Char, Many2one
+from core.auth import verify_password, get_password_hash
 
 class ResUsers(Model):
     _name = 'res.users'
@@ -25,33 +25,54 @@ class ResUsers(Model):
         
     def create(self, vals):
         if 'password' in vals:
-            vals['password'] = pwd_context.hash(vals['password'])
+            vals['password'] = get_password_hash(vals['password'])
         return super().create(vals)
     
     def write(self, vals):
         if 'password' in vals:
-            vals['password'] = pwd_context.hash(vals['password'])
+            vals['password'] = get_password_hash(vals['password'])
         return super().write(vals)
 
     def _check_credentials(self, login, password):
         """
         Verifies login/password. Returns user_id or None.
+        Supports automatic migration from plaintext to hash.
         """
-        # 1. Search user (using self.search)
-        # self is a RecordSet (likely empty if called from env['res.users'])
         users = self.search([('login', '=', login)])
         if not users:
             return None
         
-        user = users[0] # This is a RecordSet of 1 record
-        # user.password triggers lazy load
-        
-        if pwd_context.verify(password, user.password):
-             return user.id # user.ids[0]? Or make .id property?
-             # accessing .ids[0] manually for now as .id property not in base yet (but magic field is)
-             # Wait, in MagicFields we added 'id' field.
-             # Field.__get__ returns value. 
-             # user.id should return the ID integer.
-             return user.id
+        user = users[0]
+        stored_password = user.password # Can be plain 'admin' or hash '$2b$...'
+
+        if not stored_password:
+             return None
+
+        # 1. Try Hash Verification (The Secure Way)
+        try:
+            if verify_password(password, stored_password):
+                return user.id
+        except ValueError:
+            # Stored password is not a valid hash (likely plaintext)
+            pass
+        except Exception as e:
+            print(f"Auth Warning: Hash verification error: {e}")
+
+        # 2. Fallback: Plaintext Check & Auto-Migration
+        if stored_password == password:
+            print(f"SECURITY ALERT: User {login} using plaintext password. Migrating to Hash...", flush=True)
+            
+            new_hash = get_password_hash(password)
+            
+            # Direct SQL Update to bypass ORM loop/overhead and ensure commit
+            # Using self._table requires that it is set. 
+            # If we are in model context, self._table should be valid.
+            table = self._table
+            
+            # Use raw cursor from env
+            self.env.cr.execute(f'UPDATE "{table}" SET password = %s WHERE id = %s', (new_hash, user.id))
+            self.env.cr.connection.commit()
+            
+            return user.id
         
         return None

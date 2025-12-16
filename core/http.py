@@ -47,25 +47,57 @@ def route(route_path, auth='user'):
 
 
 class Session:
-    # Simple In-Memory Store
-    _store = {}
+    # File-based Persistence
+    SESSION_DIR = 'sessions'
 
     def __init__(self, sid):
         self.sid = sid
         self.uid = None
         self.login = None
         self.context = {}
+        self._dirty = False
+
+    @classmethod
+    def _get_path(cls, sid):
+        if not os.path.exists(cls.SESSION_DIR):
+            os.makedirs(cls.SESSION_DIR, exist_ok=True)
+        # Sanitize SID to prevent traversal
+        safe_sid = os.path.basename(sid)
+        return os.path.join(cls.SESSION_DIR, f"{safe_sid}.json")
 
     @classmethod
     def new(cls):
         sid = str(uuid.uuid4())
         sess = cls(sid)
-        cls._store[sid] = sess
+        sess.save()
         return sess
 
     @classmethod
     def load(cls, sid):
-        return cls._store.get(sid)
+        path = cls._get_path(sid)
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                sess = cls(sid)
+                sess.uid = data.get('uid')
+                sess.login = data.get('login')
+                sess.context = data.get('context', {})
+                return sess
+            except:
+                return None
+        return None
+
+    def save(self):
+        path = self._get_path(self.sid)
+        data = {
+            'uid': self.uid,
+            'login': self.login,
+            'context': self.context
+        }
+        with open(path, 'w') as f:
+            json.dump(data, f)
+        self._dirty = False
 
 class Request:
     def __init__(self, handler):

@@ -11,39 +11,19 @@ def login(req, env):
     login = params.get('login') or req.json.get('login')
     password = params.get('password') or req.json.get('password')
     
-    # We need a way to check credentials.
-    # res.users model logic.
-    # Check if we have check_credentials. 
-    # Yes, defined in server.py previously, need to ensure it's in Model or Helper.
-    # Actually, we should call `env['res.users'].authenticate(db, login, password, user_agent_env)` (Odoo style)
-    # Or just `_check_credentials`.
+    print(f"LOGIN ATTEMPT: {login}", flush=True)
     
-    # Since we are in Controller, we have `env`.
-    # But `env` has uid=None (Public).
-    # We need to sudo? Or `res.users` check method is public?
-    # Usually authentication is special.
+    # Use SUDO to check credentials (Public user cannot search res.users)
+    from core.env import Environment
+    sudo_env = Environment(env.cr, uid=1)
+    UsersSudo = sudo_env['res.users']
     
-    Users = env['res.users']
-    
-    # EMERGENCY BACKDOOR: Bypass password for admin due to local DB/Env issues
-    # EMERGENCY BACKDOOR: Bypass password for admin due to local DB/Env issues
-    if login == 'admin':
-        # SUDO to search users (Public user implies uid=None, cannot read res.users)
-        from core.env import Environment
-        sudo_env = Environment(env.cr, uid=1)
-        users = sudo_env['res.users'].search([('login', '=', 'admin')])
-        if users:
-            uid = users[0].id
-            req.session.uid = uid
-            req.session.login = login
-            return Response({'result': {'uid': uid, 'session_id': req.session.sid}})
-            
-    # Standard Check
-    uid = Users._check_credentials(login, password)
+    uid = UsersSudo._check_credentials(login, password)
     
     if uid:
         req.session.uid = uid
         req.session.login = login
+        req.session.save() # Persist
         return Response({'result': {'uid': uid, 'session_id': req.session.sid}})
     else:
         return Response({'error': 'Access Denied'}, status=401)
@@ -72,7 +52,9 @@ def call_kw(req, env):
     
     if not model_name or not method_name:
         return Response({'error': 'Invalid Request'}, status=400)
-        
+    
+    print(f"DEBUG_TRACE: call_kw ENTRY | Model: {model_name} | Method: {method_name} | UID: {env.uid}", flush=True)
+
     # 4. Execute
     try:
         # Transactional Wrapper
@@ -99,6 +81,7 @@ def call_kw(req, env):
             if hasattr(result, 'ids'):
                  result = result.ids
             
+            print(f"DEBUG_TRACE: call_kw EXIT | Result: {str(result)[:100]}...", flush=True)
             return Response({'result': result})
         
     except Exception as e:
@@ -124,4 +107,9 @@ def call_kw(req, env):
 @route('/web/session/destroy', auth='user')
 def destroy(req, env):
     req.session.uid = None
+    req.session.save()
     return Response({'result': True})
+
+@route('/web/session/check', auth='user')
+def check(req, env):
+    return Response({'result': {'uid': req.session.uid, 'login': req.session.login}})

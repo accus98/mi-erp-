@@ -19,6 +19,7 @@ class IrUiMenu(Model):
         # Standard ORM approach: fetch all, build tree in python.
         
         menus = self.search([])
+        print(f"DEBUG: load_menus found {len(menus)} raw menus. User={self.env.uid}", flush=True)
         # Need to read content.
         # ORM read? We don't have read() yet, we have access via record attributes.
         

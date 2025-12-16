@@ -5,8 +5,26 @@
         Bienvenido a <span class="font-bold text-indigo-600">Nexo ERP</span>
       </h1>
       
+      <!-- Debug / Error Section -->
+      <div v-if="menuStore.error" class="bg-red-100 text-red-700 p-4 rounded-lg mb-6 text-center shadow-sm">
+         <p class="font-bold">Error Cargar Menús</p>
+         <p>{{ menuStore.error }}</p>
+         <button @click="menuStore.fetchMenus()" class="mt-2 text-sm bg-red-200 hover:bg-red-300 px-3 py-1 rounded">Reintentar</button>
+      </div>
+
       <div v-if="loading" class="text-center text-slate-400 animate-pulse">
         Cargando ecosistema...
+      </div>
+
+      <div v-else-if="apps.length === 0" class="text-center text-slate-500">
+         <div class="p-6 bg-white rounded-lg shadow-sm border border-slate-200 inline-block">
+            <p class="mb-4">No hay aplicaciones disponibles.</p>
+            <p class="text-xs text-slate-400 mb-4">
+                UID: {{ sessionStore.uid }} | SID: {{ sessionStore.sessionId ? sessionStore.sessionId.substring(0,8)+'...' : 'None' }}
+            </p>
+            <button @click="menuStore.fetchMenus()" class="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700">Recargar Menú</button>
+            <button @click="sessionStore.logout()" class="ml-2 bg-red-100 text-red-700 px-4 py-2 rounded hover:bg-red-200">Cerrar Sesión</button>
+         </div>
       </div>
 
       <div v-else class="grid grid-cols-2 md:grid-cols-4 gap-6">
@@ -32,6 +50,12 @@
 </template>
 
 <script setup>
+import { useMenuStore } from '@/stores/menu';
+import { useSessionStore } from '@/stores/session';
+
+const menuStore = useMenuStore();
+const sessionStore = useSessionStore();
+
 defineProps(['apps', 'loading'])
 defineEmits(['select-app'])
 </script>

@@ -10,23 +10,28 @@ import { Squares2X2Icon } from '@heroicons/vue/24/outline'
 const menuStore = useMenuStore()
 const sessionStore = useSessionStore()
 const currentActionId = ref(null)
+const currentBreadcrumb = ref('')
 
 onMounted(() => {
+  sessionStore.log("Layout Mounted. Calling fetchMenus...");
   menuStore.fetchMenus()
 })
 
-function handleMenuClick(actionId) {
+function handleMenuClick(payload) {
+  // Payload is { actionId, label } or just actionId (if legacy)
+  const actionId = payload.actionId || payload;
+  const label = payload.label || '';
+  
   if (actionId) {
       currentActionId.value = actionId;
-      // We don't strictly need menuStore.executeAction if ActionManager does it,
-      // but if we want breadcrumbs in store later, might be useful. 
-      // For now, local state is sufficient for ActionManager.
+      currentBreadcrumb.value = label; 
   }
 }
 
 function selectApp(app) {
     menuStore.selectApp(app);
     currentActionId.value = null; // Reset when switching apps
+    currentBreadcrumb.value = '';
 }
 
 function logout() {
@@ -50,13 +55,14 @@ function logout() {
           @click="menuStore.goHome"
           class="p-2 mr-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors"
           title="Menú Principal"
+          aria-label="Menú Principal"
         >
           <Squares2X2Icon class="w-6 h-6" />
         </button>
         <span class="font-bold text-white tracking-wide truncate">{{ menuStore.currentApp.name }}</span>
       </div>
 
-      <nav class="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-hide">
+      <nav class="flex-1 overflow-y-auto p-4 space-y-2">
         <SidebarItem 
           v-for="menu in menuStore.currentSidebar" 
           :key="menu.id" 
@@ -70,7 +76,12 @@ function logout() {
       </nav>
       
        <!-- Quick Logout (Optional) -->
-       <div class="p-4 border-t border-slate-800 text-xs text-center text-slate-500 cursor-pointer hover:text-white" @click="logout">
+       <div 
+         class="p-4 border-t border-slate-800 text-xs text-center text-slate-500 cursor-pointer hover:text-white transition-colors" 
+         @click="logout"
+         role="button"
+         aria-label="Cerrar Sesión"
+       >
            Cerrar Sesión
        </div>
     </aside>
@@ -79,19 +90,28 @@ function logout() {
       
       <header class="h-16 bg-white shadow-sm border-b border-slate-200 flex items-center justify-between px-6 z-10">
         <div class="flex items-center text-sm text-slate-500">
-          <span class="cursor-pointer hover:text-indigo-600" @click="menuStore.goHome">Home</span>
-          <span class="mx-2">/</span>
-          <span class="font-medium text-slate-800">{{ menuStore.currentApp.name }}</span>
+          <button class="cursor-pointer hover:text-indigo-600 focus:outline-none focus:text-indigo-600 font-medium" @click="menuStore.goHome">Home</button>
+          <span class="mx-2 text-slate-300">/</span>
+          <span class="font-medium text-slate-700">{{ menuStore.currentApp.name }}</span>
+          <template v-if="currentBreadcrumb">
+              <span class="mx-2 text-slate-300">/</span>
+              <span class="font-semibold text-indigo-600">{{ currentBreadcrumb }}</span>
+          </template>
         </div>
 
         <div class="flex items-center space-x-4">
-           <div class="w-8 h-8 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-xs border border-indigo-200 cursor-pointer" @click="logout" title="Logout">
+           <button 
+             class="w-8 h-8 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-xs border border-indigo-200 cursor-pointer hover:bg-indigo-200 transition-colors" 
+             @click="logout" 
+             title="Logout"
+             aria-label="Logout"
+           >
              AD
-           </div>
+           </button>
         </div>
       </header>
 
-      <main class="flex-1 overflow-auto p-6 relative bg-slate-100/50">
+      <main class="flex-1 overflow-auto p-6 relative bg-slate-100/50" role="main">
       
       <ActionManager 
         v-if="currentActionId" 

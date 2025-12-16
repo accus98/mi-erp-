@@ -17,20 +17,19 @@ class IrCron(Model):
     active = Boolean(string='Active', default=True)
     
     @classmethod
-    def process_jobs(cls, db_params):
+    def process_jobs(cls):
         """
         Main loop entry point. 
-        db_params: dict for Database.connect()
         """
         from core.db import Database
         from core.env import Environment
         from core.registry import Registry
+        from core.logger import logger
         
         # Connect
         try:
-            # We create a fresh connection per loop or reuse? 
-            # Ideally short lived connection.
-            conn = Database.connect(**db_params)
+            # Connect via Pool
+            conn = Database.connect()
             cr = Database.cursor(conn)
             
             # Ensure registry is loaded (might be reloaded if new worker)
@@ -42,29 +41,36 @@ class IrCron(Model):
             
             # Find jobs
             now = datetime.now()
-            jobs = Cron.search([
-                ('active', '=', True),
-                # ('nextcall', '<=', now) # Comparison in string domain might fail if not handled well yet?
-                # Domain parser supports <=. Value needs to be string iso? 
-                # Let's rely on SQL string injection or python filter if parser weak.
-                # Domain parser: "field <= val".
-            ])
+            # Simple search, filter in python for safety
+            jobs = Cron.search([('active', '=', True)])
             
-            # Filter manually for safety if domain parser date handling is MVP
             to_run = []
             for job in jobs:
-                if job.nextcall and job.nextcall <= now:
+                # job.nextcall Is it string or datetime? ORM casts?
+                # current ORM seems to return what driver returns (datetime for timestamp)
+                next_call = job.nextcall
+                if isinstance(next_call, str):
+                     try:
+                         next_call = datetime.fromisoformat(next_call)
+                     except:
+                         pass
+                
+                if next_call and next_call <= now:
                     to_run.append(job)
             
+            if not to_run:
+                # logger.debug("Cron: No jobs to run.")
+                pass
+
             for job in to_run:
-                print(f"Cron: Processing {job.name}...")
+                logger.info(f"Cron: Processing {job.name}...")
                 try:
                     # Execute
                     model = env[job.model_id.model] # model_id is record, .model is name
                     if hasattr(model, job.method):
                         getattr(model, job.method)()
                     else:
-                        print(f"Cron Error: Method {job.method} not found in {model._name}")
+                        logger.error(f"Cron Error: Method {job.method} not found in {model._name}")
                     
                     # Update Next Call
                     new_call = now
@@ -77,21 +83,22 @@ class IrCron(Model):
                     
                     job.write({'nextcall': new_call})
                     conn.commit()
-                    print(f"Cron: Finished {job.name}")
+                    logger.info(f"Cron: Finished {job.name}")
                     
                 except Exception as e:
                     conn.rollback()
-                    print(f"Cron Failure {job.name}: {e}")
-                    traceback.print_exc()
+                    logger.error(f"Cron Failure {job.name}: {e}", exc_info=True)
             
             Database.release(conn)
             
         except Exception as e:
-            print(f"Cron Runner Error: {e}")
-            traceback.print_exc()
+            from core.logger import logger
+            logger.critical(f"Cron Runner Error: {e}", exc_info=True)
 
     @staticmethod
-    def runner_loop(db_params):
+    def runner_loop(db_params=None):
+        from core.logger import logger
+        logger.info("Cron Worker Started.")
         while True:
-            IrCron.process_jobs(db_params)
+            IrCron.process_jobs()
             time.sleep(60) # Wake up every minute

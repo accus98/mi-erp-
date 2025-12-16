@@ -23,7 +23,7 @@
 
     <button 
       v-else 
-      @click="$emit('action-clicked', menu.action)"
+      @click="$emit('action-clicked', { actionId: menu.action, label: menu.name })"
       class="w-full text-left px-3 py-2 text-sm text-slate-400 rounded-md hover:bg-indigo-600 hover:text-white transition-all"
     >
       {{ menu.name }}
