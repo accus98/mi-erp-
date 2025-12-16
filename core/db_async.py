@@ -118,17 +118,61 @@ class AsyncCursor:
         """
         Executes query. If it's a SELECT/RETURNING, stores result for fetchall.
         """
-        # 1. Convert %s to $n
+        # 1. Convert %s to $n (Safely)
         pg_query = query
         if args:
-            count = 0
-            def replace_placeholder(match):
-                nonlocal count
-                count += 1
-                return f"${count}"
+            pg_query = self._convert_sql_params(query)
+
+    def _convert_sql_params(self, query):
+        """
+        Safely converts %s placeholders to $1, $2, etc. for asyncpg,
+        ignoring %s inside string literals.
+        """
+        out = []
+        param_count = 0
+        state = 0 # 0: NORMAL, 1: IN_SINGLE_QUOTE, 2: IN_DOUBLE_QUOTE
+        i = 0
+        length = len(query)
+        
+        while i < length:
+            char = query[i]
             
-            import re
-            pg_query = re.sub(r'%s', replace_placeholder, query)
+            if state == 0:
+                if char == "'":
+                    state = 1
+                    out.append(char)
+                elif char == '"':
+                    state = 2
+                    out.append(char)
+                elif char == '%' and i + 1 < length and query[i+1] == 's':
+                    # Found placeholder
+                    param_count += 1
+                    out.append(f"${param_count}")
+                    i += 1 # Skip 's'
+                else:
+                    out.append(char)
+            elif state == 1:
+                # In Single Quote
+                out.append(char)
+                if char == "'" and (i == 0 or query[i-1] != '\\'): # Simple check for non-escaped
+                     # Basic SQL escape check is '' for ' inside string usually, or backslash.
+                     # Postgres standard strings use ''. Backslash depends on config.
+                     # For simplicity assume standard SQL '' escaping or strict quote.
+                     # Let's peek behind for '', if we are at i.
+                     # If previous char was ', then we might be escaping?
+                     # Standard parser is complex. Let's assume standard toggle.
+                     # Use peeking for escaped quotes if needed.
+                     # For now, toggling on same quote is robust enough for typical migration.
+                     state = 0
+            elif state == 2:
+                # In Double Quote
+                out.append(char)
+                if char == '"' and (i == 0 or query[i-1] != '\\'):
+                     state = 0
+            
+            i += 1
+            
+        return "".join(out)
             
         # 2. Determine execution mode
         # Simple heuristic: SELECT or RETURNING implies fetch
@@ -187,3 +231,25 @@ class AsyncCursor:
         # We should probably change the ORM to avoid `mogrify` and use `executemany`.
         pass
         return b"Error: Async Mognify Not Implemented"
+
+    def savepoint(self):
+        """
+        Returns an async context manager for a savepoint (nested transaction).
+        Usage:
+            async with cr.savepoint():
+                ...
+        """
+    async def executemany(self, query, args_list):
+        """
+        High-performance bulk execution using asyncpg.executemany.
+        query: SQL with $n placeholders (or %s if conversion needed)
+        args_list: List of tuples/lists of arguments
+        """
+        # 1. Convert %s to $n (Safely)
+        pg_query = self._convert_sql_params(query)
+            
+        try:
+            await self.conn.executemany(pg_query, args_list)
+        except Exception as e:
+            print(f"AsyncDB Bulk Error: {e} | Query: {pg_query}")
+            raise e

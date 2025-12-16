@@ -802,33 +802,12 @@ class Model(metaclass=MetaModel):
                     for tid in removing: to_delete_params.append((rid, tid))
                          
                 if to_delete_params:
-                    # Optimized Batch Delete
-                    # await self.env.cr.executemany(...) if available or loop is fine for now but let's try to optimize if driver supports
-                    # asyncpg supports executemany. Our AsyncCursor wrapper might not expose it perfectly or we can use raw pool?
-                    # Let's check db_async.py cursor wrapper. If not, safe loop is better than broken code.
-                    # As per user request, we want speed. But correctness first. 
-                    # Providing the "User's Loop" is actually WRONG because we are ASYNC.
-                    # We will use individual deletes but concurrent? No, simple loop is safest without verifying wrapper.
-                    # Wait, user asked to optimize.
-                    # Let's try to use a single DELETE query with WHERE OR derived table if possible.
-                    # Or just loop for now but clean up the code.
-                    for rid, tid in to_delete_params:
-                         await self.env.cr.execute(f'DELETE FROM "{f_obj.relation}" WHERE "{f_obj.column1}" = %s AND "{f_obj.column2}" = %s', (rid, tid))
+                     # Native Batch Delete
+                     await self.env.cr.executemany(f'DELETE FROM "{f_obj.relation}" WHERE "{f_obj.column1}" = %s AND "{f_obj.column2}" = %s', to_delete_params)
 
                 if to_insert:
-                    # Optimized Batch Insert
-                    # We can use multi-row INSERT which is standard SQL
-                    # INSERT INTO rel (c1, c2) VALUES (a,b), (c,d)...
-                    values_list = []
-                    placeholders = []
-                    for rid, tid in to_insert:
-                        values_list.extend([rid, tid])
-                        placeholders.append("(%s, %s)")
-                    
-                    if values_list:
-                        args_str = ", ".join(placeholders)
-                        query = f'INSERT INTO "{f_obj.relation}" ("{f_obj.column1}", "{f_obj.column2}") VALUES {args_str}'
-                        await self.env.cr.execute(query, tuple(values_list))
+                    # Native Batch Insert
+                    await self.env.cr.executemany(f'INSERT INTO "{f_obj.relation}" ("{f_obj.column1}", "{f_obj.column2}") VALUES (%s, %s)', to_insert)
                           
         if o2m_values:
             for record in self:
