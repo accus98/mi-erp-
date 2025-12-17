@@ -112,6 +112,21 @@ class Session:
             return sess
         return None
 
+    
+    def rotate(self):
+        """
+        Regenerate Session ID to prevent Fixation Attacks.
+        Moves data to new ID and deletes old one.
+        """
+        old_sid = self.sid
+        # Create new ID
+        self.sid = str(uuid.uuid4())
+        # Save new
+        self.save()
+        # Delete old
+        Cache.delete(f"session:{old_sid}")
+        print(f"DEBUG_SESSION: Rotated {old_sid} -> {self.sid}")
+
     def save(self):
         data = {
             'uid': self.uid,
@@ -227,8 +242,9 @@ for path, info in ROUTES.items():
                              final_response.set_cookie(key=k, value=v.value, httponly=v['httponly'], path=v['path'])
                         
                         # session cookie
-                        # Ensure samesite='lax' for localhost dev
-                        final_response.set_cookie('session_id', session.sid, httponly=True, samesite='lax')
+                        # Ensure samesite='lax' for localhost dev. Secure if HTTPS.
+                        is_secure = os.getenv('SESSION_SECURE', 'False').lower() == 'true'
+                        final_response.set_cookie('session_id', session.sid, httponly=True, samesite='lax', secure=is_secure)
                         
                         return final_response
                     elif isinstance(nx_resp, (dict, list)):

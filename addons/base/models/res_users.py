@@ -27,10 +27,16 @@ class ResUsers(Model):
         # But we are overriding it here.
         # Since we use `super().create(vals)`, we need to adapt.
         
-    async def create(self, vals):
-        if 'password' in vals:
-            vals['password'] = get_password_hash(vals['password'])
-        return await super().create(vals)
+    async def create(self, vals_list):
+        # Handle single dict vs list
+        is_list = isinstance(vals_list, list)
+        vals_seq = vals_list if is_list else [vals_list]
+        
+        for vals in vals_seq:
+            if 'password' in vals:
+                vals['password'] = get_password_hash(vals['password'])
+        
+        return await super().create(vals_list)
     
     async def write(self, vals):
         if 'password' in vals:

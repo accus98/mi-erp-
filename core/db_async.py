@@ -201,6 +201,7 @@ class AsyncCursor:
             async with cr.savepoint():
                 ...
         """
+        return self.conn.transaction()
     async def executemany(self, query, args_list):
         """
         High-performance bulk execution using asyncpg.executemany.

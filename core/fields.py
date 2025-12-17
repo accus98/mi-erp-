@@ -1,6 +1,12 @@
 import inspect
+from typing import TypeVar, Generic, Optional, TYPE_CHECKING, Any, Union
 
-class Field:
+if TYPE_CHECKING:
+    from .orm import Model
+
+T = TypeVar('T')
+
+class Field(Generic[T]):
     """
     Base class for all fields.
     """
@@ -26,16 +32,16 @@ class Field:
     def __repr__(self):
         return f"<{self.__class__.__name__} {self.name}>"
 
-    def __get__(self, record, owner):
-        if record is None: return self
-        if not record.ids: return None
+    def __get__(self, record, owner) -> T:
+        if record is None: return self # type: ignore
+        if not record.ids: return None # type: ignore
         
         record.ensure_one()
         id_val = record.ids[0]
         
         # Optimization: 'id' field is always available sync
         if self.name == 'id':
-            return id_val
+            return id_val # type: ignore
             
         key = (record._name, id_val, self.name)
         
@@ -71,15 +77,15 @@ class Field:
         for rid in record.ids:
              record.env.cache[(record._name, rid, self.name)] = value
 
-class Char(Field):
+class Char(Field[str]):
     _type = 'char'
     _sql_type = 'VARCHAR'
 
-class Text(Field):
+class Text(Field[str]):
     _type = 'text'
     _sql_type = 'TEXT'
 
-class Selection(Field):
+class Selection(Field[str]):
     _type = 'selection'
     _sql_type = 'VARCHAR'
     
@@ -88,29 +94,29 @@ class Selection(Field):
         self.selection = selection
 
 
-class Integer(Field):
+class Integer(Field[int]):
     _type = 'integer'
     _sql_type = 'INTEGER'
 
-class Boolean(Field):
+class Boolean(Field[bool]):
     _type = 'boolean'
     _sql_type = 'BOOLEAN'
 
-class Float(Field):
+class Float(Field[float]):
     _type = 'float'
     _sql_type = 'FLOAT'
 
-class Datetime(Field):
+class Datetime(Field[Any]): # Helper for datetime
     _type = 'datetime'
     _sql_type = 'TIMESTAMP'
 
-class Date(Field):
+class Date(Field[Any]):
     _type = 'date'
     _sql_type = 'DATE'
 
 DateTime = Datetime
 
-class Many2one(Field):
+class Many2one(Field['Model']):
     _type = 'many2one'
     _sql_type = 'INTEGER' 
 
@@ -119,15 +125,15 @@ class Many2one(Field):
         self.comodel_name = comodel_name
         self.ondelete = ondelete
 
-    def __get__(self, record, owner):
-        if record is None: return self
+    def __get__(self, record, owner) -> 'Model':
+        if record is None: return self # type: ignore
         # Super __get__ calls ensure_one
         val_id = super().__get__(record, owner)
         if not val_id:
-             return record.env[self.comodel_name].browse([])
-        return record.env[self.comodel_name].browse([val_id])
+             return record.env[self.comodel_name].browse([]) # type: ignore
+        return record.env[self.comodel_name].browse([val_id]) # type: ignore
 
-class One2many(Field):
+class One2many(Field[list['Model']]): # Returns RecordSet (List-like)
     _type = 'one2many'
     _sql_type = None
     
@@ -137,12 +143,12 @@ class One2many(Field):
         self.inverse_name = inverse_name
         self.store = False
     
-    def __get__(self, record, owner):
-        if record is None or not record.ids: return []
+    def __get__(self, record, owner) -> list['Model']:
+        if record is None or not record.ids: return [] # type: ignore
         record.ensure_one()
-        return record.env[self.comodel_name].search([(self.inverse_name, '=', record.ids[0])])
+        return record.env[self.comodel_name].search([(self.inverse_name, '=', record.ids[0])]) # type: ignore
 
-class Many2many(Field):
+class Many2many(Field[list['Model']]):
     _type = 'many2many'
     _sql_type = None # No column in main table
 
@@ -154,8 +160,8 @@ class Many2many(Field):
         self.column2 = column2
         self.store = False
     
-    def __get__(self, record, owner):
-        if record is None or not record.ids: return []
+    def __get__(self, record, owner) -> list['Model']:
+        if record is None or not record.ids: return [] # type: ignore
         record.ensure_one()
         
         # Assumption: relation is populated by MetaModel (or user) before runtime usage.
@@ -166,14 +172,14 @@ class Many2many(Field):
         record.env.cr.execute(query, (record.ids[0],))
         res_ids = [r[0] for r in record.env.cr.fetchall()]
         
-        return record.env[self.comodel_name].browse(res_ids)
+        return record.env[self.comodel_name].browse(res_ids) # type: ignore
 
-class Binary(Field):
+class Binary(Field[bytes]):
     _type = 'binary'
     _sql_type = None # Not stored in main table
 
-    def __get__(self, record, owner):
-        if record is None: return self
+    def __get__(self, record, owner) -> Optional[bytes]:
+        if record is None: return self # type: ignore
         if not record.ids: return None
 
         record.ensure_one()

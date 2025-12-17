@@ -24,6 +24,7 @@ async def login(req, env):
     uid = await UsersSudo._check_credentials(login, password)
     
     if uid:
+        req.session.rotate() # Prevent Fixation
         req.session.uid = uid
         req.session.login = login
         req.session.save() # Persist

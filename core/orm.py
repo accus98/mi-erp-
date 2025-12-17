@@ -31,6 +31,26 @@ class MetaModel(type):
             if isinstance(val, Field):
                 val.name = key
                 fields[key] = val
+                
+                # Auto-configure Many2many
+                if isinstance(val, Many2many) and not val.relation:
+                    # Generic Odoo-style naming
+                    # We need _name of model.
+                    # _name is in attrs.get('_name') (checked above)
+                    model_name = attrs.get('_name')
+                    if model_name:
+                        t1 = model_name.replace('.', '_')
+                        t2 = val.comodel_name.replace('.', '_')
+                        
+                        # Sort for deterministic relation name
+                        # (Odoo uses alphabetical order of table names)
+                        lists = sorted([t1, t2])
+                        val.relation = f"{lists[0]}_{lists[1]}_rel"
+                        
+                        # Columns: table1_id, table2_id
+                        # But which is column1? column1 is for 'this' model.
+                        val.column1 = f"{t1}_id"
+                        val.column2 = f"{t2}_id"
         
         if 'id' not in fields:
             f = Integer(string='ID', readonly=True); f.name='id'; fields['id']=f; setattr(cls,'id',f)
@@ -103,7 +123,7 @@ class Model(metaclass=MetaModel):
         ids = [rec.id for rec in self if func(rec)]
         return self.browse(ids)
 
-    def mapped(self, field_name):
+    async def mapped(self, field_name):
         """
         Return list of values.
         If field is relational, return recordset.
@@ -113,48 +133,61 @@ class Model(metaclass=MetaModel):
         # 1. Batch Read
         # Checking if field exists to avoid getattr magic if possible
         if field_name in self._fields:
-            # This triggers bulk fetch into cache for all IDs in self
-            # if they are not already cached.
-            # self.read([field_name]) # This returns list of dicts, but also populates cache
+            # Vectorized fetch
+            data = await self.read([field_name])
             
-            # Optimized: Just ensure they are in cache/prefetch
-            # Accessing the first record's field might trigger prefetch for all?
-            # Depends on __get__ implementation. 
-            # If __get__ uses self._prefetch_ids (which should be self.ids), then
-            # getattr(self[0], field) pre-fills cache for everyone.
-            
-            # Let's trust ORM prefetch logic but explicitly call it to be sure
-            # self._fetch_fields([field_name]) # method likely exists or similar
-            
-            # Or use read() which returns data
-            data = self.read([field_name])
-            # data is [{'id': 1, 'field': val}, ...] order? read returns mapped by id usually?
-            # ORM read returns list of dicts.
-            # We want to maintain self order.
-            
+            # Map results by ID to preserve order
             val_map = {r['id']: r[field_name] for r in data}
-            res = [val_map[rid] for rid in self.ids if rid in val_map]
+            res = [val_map.get(rid) for rid in self.ids]
             
             # Relational flattening logic
             field = self._fields[field_name]
             if field._type in ('many2one', 'one2many', 'many2many'):
-                # Flatten check
-                # If m2o, values are recordsets or (id, name)? 
-                # Our ORM read returns raw values (ids) or recordsets?
-                # Usually read() returns Tuple (id, name) for m2o or list of ids for x2m in classic Odoo.
-                # But our simple ORM might return just ID or List[ID].
-                # Let's assume it returns what is stored/cached.
+                # Res is list of IDs (or tuples for M2O?)
+                # read() returns:
+                # M2O: (id, name) or {'_m2o_id': id, ...}
+                # X2M: [id, id, ...]
                 
-                # If we want mapped to return a RecordSet for relations:
-                # We need to collect all IDs and browse them.
+                # Flattening
+                all_ids = []
+                for val in res:
+                    if not val: continue
+                    if isinstance(val, (list, tuple)):
+                        # Handle (id, name) or [id, id]
+                        if field._type == 'many2one':
+                             # M2O might be {'_m2o_id': id} or (id, name)
+                             if isinstance(val, dict) and '_m2o_id' in val:
+                                 all_ids.append(val['_m2o_id'])
+                             elif isinstance(val, tuple):
+                                 all_ids.append(val[0])
+                             else:
+                                 # Maybe just ID?
+                                 if isinstance(val, int): all_ids.append(val)
+                        else:
+                             # X2M is list of IDs
+                             all_ids.extend(val)
+                    elif isinstance(val, int):
+                        all_ids.append(val)
                 
-                # For now, let's stick to returning value list as requested by vectorization.
-                return res
+                # Remove duplicates? Standard Odoo mapped does not? 
+                # "The order of appropriate records is preserved."
+                # Duplicates are usually removed in Odoo mapped if it returns recordset.
+                
+                # Use dict.fromkeys to preserve order and remove dupes
+                unique_ids = list(dict.fromkeys(all_ids))
+                return self.env[field.comodel_name].browse(unique_ids)
             
             return res
             
+        # Fallback for non-stored/properties (slow loop but now async)
         res = []
         for rec in self:
+            # We still use checking if it's a coroutine?
+            # getattr(rec, field_name) will trigger __get__
+            # If __get__ is sync and fully cached, it returns value.
+            # If __get__ raises "Use await", we are stuck.
+            # But mapped logic above handles stored fields via read().
+            # So this fallback is only for pure python @property or similar.
             val = getattr(rec, field_name)
             res.append(val)
         return res
@@ -540,6 +573,73 @@ class Model(metaclass=MetaModel):
                 for f in sql_fields:
                     self.env.cache[(self._name, id_val, f)] = row[f]
         
+        
+        # 2. Relational Prefetching (N+1 Fix)
+        # Identify requested relation fields that are not stored (M2M, O2M)
+        # (Stored M2O are handled by sql_fields)
+        
+        relational_fields = [f for f in fields if f in self._fields and not self._fields[f]._sql_type]
+        
+        for f in relational_fields:
+            field = self._fields[f]
+            # Check if typically already cached? 
+            # We assume if requested in read(), we want to ensure it's loaded.
+            
+            # Filter IDs that need fetching (not in cache)
+            ids_to_fetch = [rid for rid in self.ids if (self._name, rid, f) not in self.env.cache]
+            if not ids_to_fetch: continue
+            
+            if isinstance(field, Many2many):
+                if not field.relation: continue
+                # Batch Fetch M2M
+                # SELECT src, dest FROM rel WHERE src IN ids
+                
+                # placeholders for IN clause
+                placeholders = ", ".join(["%s"] * len(ids_to_fetch))
+                q = f'SELECT "{field.column1}", "{field.column2}" FROM "{field.relation}" WHERE "{field.column1}" IN ({placeholders})'
+                await self.env.cr.execute(q, tuple(ids_to_fetch))
+                relations = self.env.cr.fetchall()
+                
+                # Group by Source ID
+                # Default empty list for all
+                rel_map = {rid: [] for rid in ids_to_fetch}
+                for src, dest in relations:
+                    if src in rel_map:
+                        rel_map[src].append(dest)
+                
+                # Update Cache
+                for rid, vals_list in rel_map.items():
+                    self.env.cache[(self._name, rid, f)] = vals_list
+                    
+            elif isinstance(field, One2many):
+                # Batch Fetch O2M
+                # SELECT id, inverse FROM comodel WHERE inverse IN ids
+                # We need to Select ID and Inverse Field
+                Comodel = self.env[field.comodel_name]
+                inv_field = field.inverse_name
+                
+                # We need the column name for inverse field in comodel
+                if inv_field not in Comodel._fields: continue
+                inv_col = Comodel._fields[inv_field].name # usually same
+                
+                placeholders = ", ".join(["%s"] * len(ids_to_fetch))
+                # We select ID to know the record, and inverse_col to know the parent
+                q = f'SELECT id, "{inv_col}" FROM "{Comodel._table}" WHERE "{inv_col}" IN ({placeholders})'
+                await self.env.cr.execute(q, tuple(ids_to_fetch))
+                relations = self.env.cr.fetchall()
+                
+                rel_map = {rid: [] for rid in ids_to_fetch}
+                for child_id, parent_id in relations:
+                    # parent_id might be raw ID or m2o tuple? 
+                    # If stored as integer in DB, it is ID.
+                    if parent_id in rel_map:
+                        rel_map[parent_id].append(child_id)
+                        
+                # Update Cache
+                for rid, vals_list in rel_map.items():
+                    self.env.cache[(self._name, rid, f)] = vals_list
+
+        
         # Collect M2O to resolve
         m2o_to_resolve = {} # {model: {id, ...}}
         
@@ -665,79 +765,161 @@ class Model(metaclass=MetaModel):
 
 
 
-    async def create(self, vals):
+    async def create(self, vals_list):
+        """
+        Create new record(s).
+        vals_list: Dict or List of Dicts.
+        Returns: RecordSet of created records.
+        """
         await self.check_access_rights('create')
         
-        # 1. Defaults
-        # Triggering defaults might involve searching, so async?
-        # Defaults usually static or simple lambda. If lambda does I/O, it breaks.
-        # Assuming simple defaults for now.
-        for k, field in self._fields.items():
-            if k not in vals:
-                default = getattr(field, 'default', None)
-                if default is not None:
-                     if callable(default):
-                         vals[k] = default() # Hope it's not async I/O
-                     else:
-                         vals[k] = default
-                         
-        # 2. Separate formatting
-        m2m_values = {}
-        o2m_values = {}
-        binary_values = {}
-        translation_values = {} # TODO: Async translation?
-
-        # Filter valid SQL columns
-        valid_cols = [k for k in vals if k in self._fields and self._fields[k]._sql_type]
-        
-        for k in list(vals.keys()):
-            if k in self._fields:
-                field = self._fields[k]
-                if isinstance(field, Many2many):
-                     m2m_values[k] = vals.pop(k)
-                elif isinstance(field, One2many):
-                     o2m_values[k] = vals.pop(k)
-                elif isinstance(field, Binary):
-                     binary_values[k] = vals.pop(k)
-
-        # 3. Insert
-        insert_id = None
-        if valid_cols:
-            cols = ", ".join([f'"{k}"' for k in valid_cols])
-            placeholders = ", ".join(["%s"] * len(valid_cols)) # Wrapper converts to $n
-            values = [vals[k] for k in valid_cols]
+        if isinstance(vals_list, dict):
+            vals_list = [vals_list]
             
-            query = f'INSERT INTO "{self._table}" ({cols}) VALUES ({placeholders}) RETURNING id'
-            await self.env.cr.execute(query, tuple(values))
-            res = self.env.cr.fetchone()
-            insert_id = res['id'] if res else None
+        # 1. Apply Defaults & Pre-process
+        # We need a unified set of keys for the Batch Insert
+        # But we must apply defaults first to know all keys.
+        
+        # Optimization: Scan fields with defaults once? 
+        # Or just loop. 1000 records is small for Python loop.
+        
+        default_fields = [k for k, f in self._fields.items() if hasattr(f, 'default')]
+        
+        processed_vals_list = []
+        
+        for vals in vals_list:
+            # Copy to avoid mutating input check
+            v = vals.copy()
+            for k in default_fields:
+                if k not in v:
+                    field = self._fields[k]
+                    default = field.default
+                    if callable(default):
+                         v[k] = default()
+                    else:
+                         v[k] = default
+            processed_vals_list.append(v)
+            
+        # 2. Separate formatting (Relations vs SQL)
+        # We need to extract M2M/O2M/Binary for POST-INSERT processing
+        # And keep only SQL fields for INSERT
+        
+        sql_vals_list = []
+        relation_data = [] # List of (index, m2m, o2m, binary)
+        
+        # Identify UNION of all keys that are valid SQL columns
+        # To ensure all rows have same columns for INSERT statement
+        all_keys = set()
+        for v in processed_vals_list:
+            all_keys.update(v.keys())
+            
+        valid_cols = sorted([k for k in all_keys if k in self._fields and self._fields[k]._sql_type])
+        
+        # Robust ID Handling:
+        # If 'id' is in valid_cols (e.g. passed as None), but no record has a real value,
+        # remove it so Postgres uses the SERIAL default.
+        if 'id' in valid_cols:
+             has_id = any(v.get('id') is not None for v in processed_vals_list)
+             if not has_id:
+                 valid_cols.remove('id')
+        
+        for idx, vals in enumerate(processed_vals_list):
+            m2m = {}
+            o2m = {}
+            binary = {}
+            
+            # Extract non-SQL fields
+            for k, field in self._fields.items():
+                if k in vals:
+                     if isinstance(field, Many2many):
+                         m2m[k] = vals[k]
+                     elif isinstance(field, One2many):
+                         o2m[k] = vals[k]
+                     elif isinstance(field, Binary):
+                         binary[k] = vals[k]
+            
+            relation_data.append({
+                'm2m': m2m, 'o2m': o2m, 'binary': binary
+            })
+            
+            # Prepare SQL Dict (filling missing with None)
+            row = {}
+            for col in valid_cols:
+                row[col] = vals.get(col, None)
+            sql_vals_list.append(row)
+
+        # 3. Batch Insert
+        created_ids = []
+        
+        if not sql_vals_list:
+             # Empty inserts? (e.g. only default values or empty)
+             # If processed_vals_list has items but no valid cols?
+             # INSERT DEFAULT VALUES
+             for _ in processed_vals_list:
+                 await self.env.cr.execute(f'INSERT INTO "{self._table}" DEFAULT VALUES RETURNING id')
+                 res = self.env.cr.fetchone()
+                 created_ids.append(res['id'])
         else:
-             # Empty insert
-             query = f'INSERT INTO "{self._table}" DEFAULT VALUES RETURNING id'
-             await self.env.cr.execute(query)
-             res = self.env.cr.fetchone()
-             insert_id = res['id']
-             
-        # 4. Update Cache
-        if insert_id:
-             new_id = insert_id
-             for k in valid_cols:
-                 self.env.cache[(self._name, new_id, k)] = vals[k]
-
-        record = self.browse([insert_id])
-        
-        # 5. Relations
-        if m2m_values:
-            await record.write(m2m_values)
+            # Construct Massive Query
+            # INSERT INTO table (c1, c2) VALUES ($1, $2), ($3, $4) ... RETURNING id
+            cols_clause = ", ".join([f'"{c}"' for c in valid_cols])
             
-        if o2m_values:
-            for k, v in o2m_values.items():
-                await self._process_one2many(record, k, v)
-                
-        if binary_values:
-            await self._write_binary(record, binary_values)
+            # Values List flattening
+            flattened_values = []
+            placeholders_parts = []
+            
+            # We assume sql_vals_list has same order of valid_cols
+            for row in sql_vals_list:
+                 row_values = [row[c] for c in valid_cols]
+                 flattened_values.extend(row_values)
+                 
+                 # ($1, $2, ...)
+                 # We rely on executemany or manual building? 
+                 # User wants 1 Query. executemany in asyncpg can send 1 query but doesn't return IDs easily.
+                 # Manual construction is best for RETURNING id.
+                 
+                 # Placeholders: %s
+                 row_ph = "(" + ", ".join(["%s"] * len(valid_cols)) + ")"
+                 placeholders_parts.append(row_ph)
+            
+            values_clause = ", ".join(placeholders_parts)
+            
+            query = f'INSERT INTO "{self._table}" ({cols_clause}) VALUES {values_clause} RETURNING id'
+            
+            # Execute
+            await self.env.cr.execute(query, tuple(flattened_values))
+            
+            # Fetch All IDs
+            rows = self.env.cr.fetchall() # returns list of Records/Dicts
+            created_ids = [r['id'] for r in rows]
 
-        return record
+        # 4. Update Cache (Batch)
+        for idx, new_id in enumerate(created_ids):
+             row = sql_vals_list[idx] if sql_vals_list else {}
+             for col, val in row.items():
+                 self.env.cache[(self._name, new_id, col)] = val
+                 
+        records = self.browse(created_ids)
+        
+        # 5. Process Relations (Looping but necessary for specific logic)
+        # Note: If we really want batch here, we need write() to support batch.
+        # But write() usually takes 1 set of values for ids.
+        # For Creation, each record might have different relations.
+        # So we loop.
+        
+        for idx, r_data in enumerate(relation_data):
+            record = records[idx]
+            m2m = r_data['m2m']
+            o2m = r_data['o2m']
+            binary = r_data['binary']
+            
+            if m2m: await record.write(m2m)
+            if binary: await self._write_binary(record, binary)
+            if o2m:
+                for k, v in o2m.items():
+                     await self._process_one2many(record, k, v)
+                     
+        return records
 
     async def write(self, vals):
         await self.check_access_rights('write')

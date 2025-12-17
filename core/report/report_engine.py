@@ -14,7 +14,13 @@ class IrActionsReport(Model):
     def render(self, docids, data=None):
         """
         Render the report for given docids.
-        Returns: bytes (PDF) or string (HTML)
+        
+        CRITICAL ARCHITECTURE NOTE:
+        This engine is strictly for DOCUMENT GENERATION (PDFs, Emails, Printed Reports).
+        It must NOT be used for User Interface (UI) Views.
+        UI Views are rendered Client-Side using JSON architecture (get_view_info).
+        
+        Returns: bytes (PDF) or string (HTML for printing)
         """
         # Fetch records
         docs = self.env[self.model].browse(docids)
