@@ -1,67 +1,79 @@
+from pydantic import BaseModel, create_model, Field as PydanticField
+from typing import Any, List, Optional, Union, Dict
+from core.fields import Char, Integer, Float, Boolean, Many2one, One2many, Many2many, Selection, Text, Binary, Date, Datetime
 
-from pydantic import BaseModel, create_model
-from typing import Any, Dict, List, Optional
-from core.fields import Char, Integer, Float, Boolean, Text, Selection, Many2one, One2many, Many2many, Date, Datetime
-
-# Cache generated models to avoid recreation
-_model_cache = {}
-
-def get_pydantic_model(env_model, mode='read'):
+class SchemaFactory:
     """
-    Dynamically creates a Pydantic Model from an ORM Model instance or class.
-    mode: 'read' (all fields) or 'write' (only writable fields, no IDs)
+    Generates Pydantic Models dynamically from Odoo Models.
+    Used for API validation and automatic documentation (OpenAPI).
     """
-    model_name = env_model._name
-    cache_key = f"{model_name}_{mode}"
     
-    if cache_key in _model_cache:
-        return _model_cache[cache_key]
-        
-    fields_def = {}
-    
-    # Iterate ORM fields
-    for fname, field in env_model._fields.items():
-        if fname == 'id' and mode == 'write':
-            continue
+    _schema_cache = {}
+
+    @classmethod
+    def get_create_schema(cls, env, model_name: str) -> BaseModel:
+        cache_key = (model_name, 'create')
+        if cache_key in cls._schema_cache:
+            return cls._schema_cache[cache_key]
             
-        pydantic_type = str
-        default = None
+        model = env[model_name]
+        fields_def = {}
         
-        # Mapping Types
-        if isinstance(field, Integer):
-            pydantic_type = int
+        for name, field in model._fields.items():
+            if name in ('id', 'create_date', 'write_date', 'create_uid', 'write_uid'):
+                continue
+            
+            py_type = cls._get_python_type(field)
+            
+            # Create: Required fields are required. Others optional.
+            if field.required:
+                fields_def[name] = (py_type, ...) # Ellipsis means required
+            else:
+                fields_def[name] = (Optional[py_type], None)
+                
+        pydantic_model = create_model(f"{model_name}Create", **fields_def)
+        cls._schema_cache[cache_key] = pydantic_model
+        return pydantic_model
+
+    @classmethod
+    def get_write_schema(cls, env, model_name: str) -> BaseModel:
+        cache_key = (model_name, 'write')
+        if cache_key in cls._schema_cache:
+            return cls._schema_cache[cache_key]
+            
+        model = env[model_name]
+        fields_def = {}
+        
+        for name, field in model._fields.items():
+            if name in ('id', 'create_date', 'write_date', 'create_uid', 'write_uid'):
+                continue
+                
+            py_type = cls._get_python_type(field)
+            
+            # Write: All fields are optional (partial update)
+            fields_def[name] = (Optional[py_type], None)
+
+        pydantic_model = create_model(f"{model_name}Write", **fields_def)
+        cls._schema_cache[cache_key] = pydantic_model
+        return pydantic_model
+        
+    @classmethod
+    def _get_python_type(cls, field):
+        if isinstance(field, (Integer, Many2one)):
+            return int
         elif isinstance(field, Float):
-            pydantic_type = float
+            return float
         elif isinstance(field, Boolean):
-            pydantic_type = bool
-        elif isinstance(field, (Char, Text, Selection)):
-            pydantic_type = str
-        elif isinstance(field, (Date, Datetime)):
-            pydantic_type = str # For now simple string ISO
-        elif isinstance(field, Many2one):
-             # For write: accepts ID (int)
-             # For read: returns ID (int) or tuple (id, name) depending on context?
-             # Let's standardize on ID for REST API simplicity for now.
-             pydantic_type = Optional[int]
+            return bool
+        elif isinstance(field, (Char, Text, Selection, Date, Datetime)):
+            return str
         elif isinstance(field, (One2many, Many2many)):
-             # List of IDs 
-             pydantic_type = List[int]
-             default = []
-             
-        # Optionality
-        if not field.required:
-             pydantic_type = Optional[pydantic_type]
-             
-        fields_def[fname] = (pydantic_type, default)
-    
-    # Create the class
-    pydantic_model = create_model(
-        f"{model_name.replace('.', '_')}_{mode}",
-        **fields_def
-    )
-    
-    _model_cache[cache_key] = pydantic_model
-    return pydantic_model
+            # Accepts List of IDs or List of Command Tuples
+            # Simple validation: List[Any] for now to allow [1, 2] AND [(6, 0, [1])]
+            return List[Any] 
+        elif isinstance(field, Binary):
+            return str # Base64 string
+        return Any
 
 class GenericResponse(BaseModel):
     success: bool

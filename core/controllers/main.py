@@ -59,7 +59,43 @@ async def call_kw(req, env):
     
     print(f"DEBUG_TRACE: call_kw ENTRY | Model: {model_name} | Method: {method_name} | UID: {env.uid}", flush=True)
 
-    # 4. Execute
+    # 3. Dynamic API Validation (Phase 6)
+    if method_name in ('create', 'write'):
+        from core.api.schema import SchemaFactory
+        try:
+            if method_name == 'create':
+                schema = SchemaFactory.get_create_schema(env, model_name)
+                # create args: [vals] or [vals_list]
+                vals_arg = args[0]
+                vals_list = vals_arg if isinstance(vals_arg, list) else [vals_arg]
+                
+                for v in vals_list:
+                    schema(**v) # Validates and raises ValidationError
+                    
+            elif method_name == 'write':
+                # write args: [ids, vals]
+                # Check args length
+                if len(args) > 1:
+                    vals = args[1]
+                    schema = SchemaFactory.get_write_schema(env, model_name)
+                    schema(**vals)
+                    
+        except Exception as e:
+            # Pydantic ValidationError or other
+            import traceback
+            # traceback.print_exc()
+            return Response({
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": 400,
+                    "message": "Validation Error",
+                    "data": {
+                        "name": "ValidationError",
+                        "message": str(e)
+                    }
+                }
+            })
     try:
         # Transactional Wrapper
         # If any error occurs inside, rollback happens automatically via context manager.

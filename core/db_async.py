@@ -113,6 +113,8 @@ class AsyncCursor:
     def __init__(self, conn):
         self.conn = conn
         self._last_result = None
+        import sqlparams
+        self._params_converter = sqlparams.SQLParams('format', 'numeric_dollar')
         
     async def execute(self, query, args=None):
         """
@@ -144,16 +146,19 @@ class AsyncCursor:
 
     def _convert_sql_params(self, query, args):
         """
-        Safely converts query to use $n placeholders using sqlparams library.
-        Returns (new_query, new_args)
+        Convert %s style parameters to $1, $2 (asyncpg).
         """
-        import sqlparams
-        # 'format' style is %s. 'postgresql' style is $n.
-        # We want to convert FROM 'format' TO 'postgresql'.
-        # sqlparams.SQLParams(target_style, source_style)
-        
-        converter = sqlparams.SQLParams('format', 'numeric_dollar')
-        return converter.format(query, args)
+        # OPTIMIZATION: If query already uses $1, assume Native SQL.
+        # This bypasses the expensive sqlparams conversion.
+        if '$' in query:
+             return query, args
+
+        # Legacy Support (%s)
+        try:
+            return self._params_converter.format(query, args)
+        except Exception as e:
+            # Fallback or invalid format
+            raise e
             
     def fetchall(self):
         # This MUST be sync because ORM expects it sync?
@@ -192,7 +197,24 @@ class AsyncCursor:
         # Warning: This is purely for the "Simulated" mogrify the ORM calls.
         # We should probably change the ORM to avoid `mogrify` and use `executemany`.
         pass
-        return b"Error: Async Mognify Not Implemented"
+    def mogrify(self, query, args):
+        """
+        Safe Simulation of mogrify for Logging/Debugging purposes only.
+        DO NOT USE FOR EXECUTION.
+        Returns bytes (mocking psycopg2) or str.
+        """
+        try:
+             # Very basic simulation: try generic python formatting
+             # This handles %s -> value textual replacement
+             # It is NOT SQL injection safe, but okay for logs.
+             if args:
+                # Escape args for display if possible? 
+                # For now just naive format
+                formatted = query % tuple(repr(a) for a in args)
+                return formatted.encode('utf-8')
+             return query.encode('utf-8')
+        except Exception as e:
+             return f"Mogrify Error: {e} | Query: {query} | Args: {args}".encode('utf-8')
 
     def savepoint(self):
         """

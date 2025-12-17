@@ -1,13 +1,20 @@
+import os
 from jose import jwt
 from datetime import datetime, timedelta
 from typing import Optional
 from passlib.context import CryptContext
+import os
 
 # Configuración de Hashing
 # Fallback to pbkdf2_sha256 due to bcrypt/passlib compatibility issues
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
-SECRET_KEY = "SECRET_CHANGE_ME"  # Move to env var in production
+# SECURITY: Externalize Keys
+# Warning: Default key is for dev only.
+SECRET_KEY = os.getenv('SECRET_KEY', "SECRET_CHANGE_ME")
+if SECRET_KEY == "SECRET_CHANGE_ME":
+    print("WARNING: Using insecure default SECRET_KEY. Set 'SECRET_KEY' in environment.")
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
