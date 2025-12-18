@@ -1,196 +1,88 @@
-
-import asyncio
-from jinja2 import Environment as JinjaEnv, DebugUndefined
-import xml.etree.ElementTree as ET
-import re
+import jinja2
+from weasyprint import HTML, CSS
+try:
+    from core.registry import Registry
+except ImportError:
+    pass # Might be imported by registry
 
 class ReportEngine:
     def __init__(self, env):
         self.env = env
-        self.jinja_env = JinjaEnv(undefined=DebugUndefined)
-
-    async def render(self, report_name, docids, data=None):
-        """
-        Render a report to HTML.
-        :param report_name: ID/Name of the view (e.g. 'account.report_invoice')
-        :param docids: List of IDs to render
-        :param data: Optional context data
-        :return: Rendered HTML string.
-        """
-        # 1. Fetch Report Action/View
-        # Assuming report_name is a View Name/ID (QWeb View) rather than Action for MVP
-        view = await self._get_view(report_name)
-        if not view:
-            raise ValueError(f"Report View '{report_name}' not found.")
-            
-        # 2. Resolve Inheritance (Validation)
-        # Assuming View Manager provides 'arch_combined'
-        # Current ir.ui.view model handles basic inheritance. 
-        # But we need to walk the tree.
-        # Let's implement full 'get_combined_arch' logic here or in Model.
-        # For MVP, assume view.arch is valid or handle single level?
-        # Actually Model.apply_inheritance exists.
-        
-        # We need to trace upstream (Base) -> Downstream (Extensions)
-        # If 'report_name' is the Base, we search for extensions.
-        # If 'report_name' is an Extension, we find base.
-        # Typically we render the Base View (report_name refers to base).
-        
-        arch = await self._get_combined_arch(view)
-        
-        # 3. Transpile QWeb -> Jinja2
-        template_str = self._transpile_qweb(arch)
-        
-        # 4. Fetch Data
-        # docs = Browse Records
-        model_name = view.model
-        if not model_name:
-             # Generic
-             model_name = 'base' # Dummy?
-             docs = []
-        else:
-             docs = self.env[model_name].browse(docids)
-             # Prefetch? await docs.read()?
-             # QWeb access usually triggers lazy loading (FieldFuture).
-             # So we pass docs directly.
-             
-        # 5. Render
-        template = self.jinja_env.from_string(template_str)
-        
-        render_vals = {
-            'docs': docs,
-            'user': self.env.user,
-            'data': data or {}
-        }
-        
-        return template.render(render_vals)
+        # Configurar Jinja2 Loader desde directorios de módulos
+        # Assumes running from root
+        self.loader = jinja2.FileSystemLoader(['addons/', 'core/reports/templates/'])
+        self.env_jinja = jinja2.Environment(loader=self.loader)
 
     async def render_pdf(self, report_name, docids, data=None):
         """
-        Render report to PDF bytes.
+        Renders a report to PDF bytes.
+        :param report_name: Name of the report (e.g., 'sales.report_invoice')
+        :param docids: List of IDs to render
+        :param data: Optional extra data context
         """
-        html = await self.render(report_name, docids, data)
+        # 1. Obtener Datos
+        # Assuming report_name maps to a model or we assume the caller knows the model
+        # For a generic engine, we usually look up ir.actions.report to find the model.
+        # For this prototype, we'll assume the caller passes the right context or we infer it.
+        # Let's assume report_name is like 'module.template_name' and we need to know the model.
+        # For simpliciy in prototype: The caller often passes the model docs directly or we browse them.
         
-        # Try WeasyPrint
+        # Real Odoo logic: look up ir.actions.report by name -> get model -> browse(docids)
+        # Here we will assume docids are linked to a specific model provided in 'data' or inferred?
+        # Let's assume the user of this engine invokes it with a known model context.
+        
+        # If we stick to the user's snippet:
+        # docs = self.env[report_name].browse(docids) <-- This implies report_name IS the model name?
+        # Usually report_name is 'sale.report_saleorder', model is 'sale.order'.
+        
+        # We will implement a generic basic version as requested.
+        # User snippet: docs = self.env[report_name].browse(docids)
+        # We will modify this to use data['model'] if available, or assume report_name is model.
+        
+        model_name = data.get('model') if data else report_name
+        docs = await self.env[model_name].browse(docids).read() # Read data for template?
+        # Browse implies objects. Logic:
+        docs_objs = self.env[model_name].browse(docids)
+        
+        # 2. Renderizar HTML (Jinja2)
+        # We need to find the template file. 
+        # report_name 'sales.report_invoice' -> addons/sales/report_invoice.html?
+        # Simple mapping for prototype:
+        template_path = f"{report_name.replace('.', '/')}.html"
+        
         try:
-            from weasyprint import HTML
-            import io
-            buffer = io.BytesIO()
-            HTML(string=html).write_pdf(buffer)
-            return buffer.getvalue()
-        except ImportError:
-            print("Report Warning: WeasyPrint not installed. Returning HTML bytes.")
-            return html.encode('utf-8')
-        except Exception as e:
-            print(f"Report Error (PDF): {e}")
-            raise e
-
-    async def _get_view(self, name):
-        # Allow ID or XMLID (String)
-        # For MVP: 'module.name' string or pure name.
-        # Use Search.
-        views = await self.env['ir.ui.view'].search([('name', '=', name)])
-        if not views:
-             # Try assuming it's the model? No.
+            template = self.env_jinja.get_template(template_path)
+        except jinja2.TemplateNotFound:
+             # Fallback or error
+             print(f"Template not found: {template_path}")
              return None
-        return views[0]
 
-    async def _get_combined_arch(self, view):
-        # 1. Get Base Arch
-        arch = view.arch
+        # Prepare context
+        # We need to ensure 'docs' are accessible. 
+        # In async ORM, accessing fields on 'docs' (browse records) triggers awaitable calls?
+        # Jinja2 is synchronous. We must pre-fetch or use a sync-proxy wrapper.
+        # FOR PROTOTYPE: We pre-read fields or pass raw read() dicts.
+        # Better: Pass the browse objects but warn that lazy loading inside Jinja might fail in async.
+        # FIX: We'll assume for now we pass a list of dicts (read result) as 'docs'.
         
-        # 2. Search for inheriting views (mode='extension') associated with this view
-        # inherit_id = view.id
-        extensions = await self.env['ir.ui.view'].search([
-            ('inherit_id', '=', view.id),
-            ('mode', '=', 'extension')
-        ], order='priority asc') # Apply by priority
+        # Read all fields for now (expensive but safe for prototype)
+        docs_data = await docs_objs.read() 
         
-        # 3. Apply extensions in order
-        for ext in extensions:
-            # We need to read arch of ext
-            # Model.apply_inheritance(base, extension)
-            arch = self.env['ir.ui.view'].apply_inheritance(arch, ext.arch)
-            
-        return arch
+        html_string = template.render({
+            'docs': docs_data,
+            'user': self.env.user,
+            'company': self.env.company,
+            'data': data or {}
+        })
 
-    def _transpile_qweb(self, xml_str):
-        """
-        Convert QWeb XML (t-foreach, t-field) to Jinja2.
-        """
-        root = ET.fromstring(xml_str)
+        # 3. Convertir a PDF (WeasyPrint)
+        base_css = CSS(string="""
+            @page { size: A4; margin: 1cm; @bottom-center { content: counter(page); } }
+            body { font-family: sans-serif; font-size: 12px; }
+            table { width: 100%; border-collapse: collapse; }
+            th { border-bottom: 1px solid black; }
+            td { padding: 4px; }
+        """)
         
-        def process_node(node):
-            # Start Tag
-            tag = node.tag
-            attribs = node.attrib
-            
-            # Logic Directives
-            # 1. t-foreach
-            prefix = ""
-            suffix = ""
-            
-            if 't-foreach' in attribs:
-                var = attribs.pop('t-foreach')
-                as_var = attribs.pop('t-as', 'item')
-                prefix += f"{{% for {as_var} in {var} %}}"
-                suffix = f"{{% endfor %}}{suffix}"
-            
-            if 't-if' in attribs:
-                condition = attribs.pop('t-if')
-                prefix += f"{{% if {condition} %}}"
-                suffix = f"{{% endif %}}{suffix}"
-                
-            # Content Directives
-            text_content = node.text or ""
-            
-            if 't-field' in attribs:
-                field = attribs.pop('t-field')
-                # Replace content with {{ field }}
-                # Also handle widget logic here? For MVP: format(field)
-                text_content = f"{{{{ {field} }}}}"
-                node.text = text_content
-                
-            if 't-esc' in attribs: # Escape HTML
-                expr = attribs.pop('t-esc')
-                text_content = f"{{{{ {expr} }}}}"
-                node.text = text_content
-
-            if 't-raw' in attribs: # No Escape
-                expr = attribs.pop('t-raw')
-                text_content = f"{{{{ {expr} | safe }}}}"
-                node.text = text_content
-                
-            # Recursion
-            inner_html = ""
-            if node.text: inner_html += node.text
-            for child in node:
-                inner_html += process_node(child)
-                if child.tail: inner_html += child.tail
-            
-            # Reconstruct Tag (Approximation)
-            # Jinja blocks usually wrap the tag.
-            # <div t-if="cond">...</div> -> {% if cond %}<div>...</div>{% endif %}
-            
-            # Attribs to string
-            attrs_str = " ".join([f'{k}="{v}"' for k, v in attribs.items()])
-            if attrs_str: attrs_str = " " + attrs_str
-            
-            tag_open = f"<{tag}{attrs_str}>"
-            tag_close = f"</{tag}>"
-            
-            return f"{prefix}{tag_open}{inner_html}{tag_close}{suffix}"
-
-        # Root might be <data> or <template>. 
-        # If data, process children.
-        # But simple views usually are <div>...</div>
-        
-        # ET.tostring helper won't work well with our custom wrapping.
-        # We manually process.
-        
-        result = process_node(root)
-        
-        # Remove Root Tag wrapper if it was artificial? 
-        # Usually view arch has a root.
-        
-        return result
+        pdf_bin = HTML(string=html_string).write_pdf(stylesheets=[base_css])
+        return pdf_bin

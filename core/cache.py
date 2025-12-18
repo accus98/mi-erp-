@@ -23,6 +23,8 @@ class RedisCache:
         
         self.use_redis = True
         self.memory_store = {}
+        # Reverse Index for O(1) L1 Invalidation: { model_name: { (model, id, field), ... } }
+        self._model_index = {}
         
         try:
             self.redis = redis.Redis(
@@ -71,6 +73,13 @@ class RedisCache:
         # L1: Memory
         self.memory_store[key] = value
         
+        # Indexing for L1 Invalidation
+        if isinstance(key, tuple) and len(key) >= 1:
+            model = key[0]
+            if model not in self._model_index:
+                 self._model_index[model] = set()
+            self._model_index[model].add(key)
+        
         # L2: Redis
         try:
             val_str = json.dumps(value)
@@ -100,6 +109,11 @@ class RedisCache:
         if key in self.memory_store:
             del self.memory_store[key]
             
+        if isinstance(key, tuple) and len(key) >= 1:
+            model = key[0]
+            if model in self._model_index:
+                self._model_index[model].discard(key)
+            
         # L2
         try:
             if self.use_redis:
@@ -116,27 +130,21 @@ class RedisCache:
         """
         if not self.initialized: self.initialize()
         
-        # 1. L1 Invalidation (Iterative for now, assumed small per process)
-        keys_to_del_l1 = []
-        for key in list(self.memory_store.keys()):
-            if isinstance(key, tuple) and len(key) >= 2:
-                k_model, k_id = key[0], key[1]
-                if k_model == model:
-                    if ids is None or k_id in ids:
-                        keys_to_del_l1.append(key)
-        
-        for k in keys_to_del_l1:
-            del self.memory_store[k]
+        # 1. L1 Invalidation (O(1) with Reverse Index)
+        if model in self._model_index:
+            keys_to_remove = list(self._model_index[model]) # Safe Copy
+            
+            for k in keys_to_remove:
+                # k is (model, id, field)
+                if ids is None or k[1] in ids:
+                    if k in self.memory_store:
+                        del self.memory_store[k]
+                    self._model_index[model].discard(k)
             
         # 2. L2 Redis Invalidation (Sets)
         try:
             if self.use_redis:
                 target_ids = ids if ids else [] 
-                # If ids is None, we might need to invalidate ALL keys for model.
-                # Current deps structure deps:model:id tracks by ID.
-                # To support 'invalidate_model(model)', we need 'deps:model:ALL'?
-                # Or scan 'deps:model:*'. Scan is better than keys scan.
-                # For this refactor, we focus on ID-based invalidation optimization.
                 
                 keys_to_del_redis = []
                 sets_to_del = []

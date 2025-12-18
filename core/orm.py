@@ -867,44 +867,101 @@ class Model(metaclass=MetaModel):
 
     async def search_read(self, domain=None, fields=None, offset=0, limit=None, order=None, cursor=None):
         """
-        Combines search and read.
-        Optimized with JOINs for simple M2O cases.
+        Hyper-Optimized: Single Query with Automatic Joins for Names.
+        Returns: [{'id': 1, 'partner_id': (5, 'Agrolait')}, ...]
         """
-        # 1. Determine Fields
-        if not fields:
+        await self.check_access_rights('read')
+        
+        # 1. Definir campos a leer
+        if fields:
+            fields = await self._filter_authorized_fields('read', fields)
+        else:
             fields = [f for f in self._fields if self._fields[f]._sql_type]
-            
-        # 2. Check Optimization (Stored + M2O only)
-        # We only optimize if all fields are M2O or Simple SQL types.
-        # No M2M, O2M, or Non-Stored Compute.
-        can_optimize = True
-        join_fields = [] # List of (field_name, FieldObj)
         
-        for f in fields:
-            if f not in self._fields: continue
-            if f == 'id': continue
-            field = self._fields[f]
+        if 'id' not in fields: fields.insert(0, 'id')
+
+        # 2. Preparar Setup de Query
+        from .tools.sql import SQLParams
+        from .tools.domain_parser import DomainParser
+        
+        sql = SQLParams()
+        col_map = {}
+        select_parts = []
+        joins_parts = []
+        
+        # 3. Selección Inteligente de Columnas + JOINs
+        for fname in fields:
+            if fname not in self._fields: continue
+            field = self._fields[fname]
             
-            if not field.store or not field._sql_type:
-                can_optimize = False
-                break
-                
             if field._type == 'many2one':
-                join_fields.append((f, field))
-            elif field._type in ('one2many', 'many2many', 'binary'):
-                can_optimize = False # Avoid join explosion or complexity
-                break
+                # AUTOMATIC JOIN: Traemos el ID y el Name de la tabla relacionada
+                comodel_name = field.comodel_name
+                if comodel_name in self.env.registry:
+                    comodel = self.env[comodel_name]
+                    join_table = comodel._table
+                    alias = f"{fname}_rel"
+                    
+                    # Add LEFT JOIN
+                    joins_parts.append(f'LEFT JOIN "{join_table}" AS "{alias}" ON "{self._table}"."{fname}" = "{alias}".id')
+                    
+                    # Select ID and Name from Alias
+                    alias_id = f"{fname}_vals_id"
+                    alias_name = f"{fname}_vals_name"
+                    
+                    select_parts.append(f'"{alias}".id AS "{alias_id}", "{alias}".name AS "{alias_name}"')
+                    col_map[fname] = {'type': 'm2o', 'id': alias_id, 'name': alias_name}
+                else:
+                    # Fallback si modelo no existe
+                    select_parts.append(f'"{self._table}"."{fname}"')
+                    col_map[fname] = {'type': 'raw', 'col': fname}
+            
+            elif field._sql_type:
+                # Campo normal
+                select_parts.append(f'"{self._table}"."{fname}"')
+                col_map[fname] = {'type': 'raw', 'col': fname}
+
+        # 4. Aplicar Domain (WHERE)
+        parser = DomainParser()
+        where_clause, _ = parser.parse(domain or [], param_builder=sql)
         
-        if can_optimize:
-             try:
-                 return await self._search_read_optimized(domain, fields, offset, limit, order, join_fields)
-             except Exception as e:
-                 print(f"Optimization Warn: {e}. Falling back to standard.")
-                 # Fallback
+        # Aplicar Reglas de Seguridad
+        rule_clause, _ = await self._apply_ir_rules('read', param_builder=sql)
+        final_where = f"({where_clause})"
+        if rule_clause: final_where += f" AND ({rule_clause})"
+
+        # Construct Query
+        select_sql = ", ".join(select_parts)
+        join_sql = " ".join(joins_parts)
+        query = f'SELECT {select_sql} FROM "{self._table}" {join_sql} WHERE {final_where}'
         
-        records = await self.search(domain or [], offset=offset, limit=limit, order=order, cursor=cursor)
-        if not records: return []
-        return await records.read(fields)
+        # Order / Limit / Offset
+        if order: 
+            safe_order = self._validate_order(order)
+            if safe_order: query += f" ORDER BY {safe_order}"
+        if limit: query += f" LIMIT {limit}"
+        if offset: query += f" OFFSET {offset}"
+
+        # 5. Ejecutar
+        await self.env.cr.execute(query, sql.get_params())
+        rows = self.env.cr.fetchall()
+
+        # 6. Formatear Respuesta (Tuple Construction)
+        results = []
+        for row in rows:
+            res = {}
+            for fname, meta in col_map.items():
+                if meta['type'] == 'raw':
+                    res[fname] = row[fname]
+                elif meta['type'] == 'm2o':
+                    rid = row[meta['id']]
+                    rname = row[meta['name']]
+                    res[fname] = (rid, rname) if rid else False
+            results.append(res)
+            
+        return results
+
+
 
     async def _search_read_optimized(self, domain, fields, offset, limit, order, join_fields):
         from .tools.domain_parser import DomainParser

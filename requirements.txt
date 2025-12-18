@@ -12,6 +12,8 @@ alembic
 sqlalchemy
 redis
 pypika
+weasyprint
+jinja2
 alembic
 sqlalchemy
 psycopg2-binary

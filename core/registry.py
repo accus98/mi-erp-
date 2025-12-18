@@ -47,18 +47,27 @@ class Registry:
             print("Warning: Introspection models not loaded.")
             return
 
-        # Explicitly init basic tables for these 2 essential models
-        await IrModel._auto_init(cr)
-        await IrFields._auto_init(cr)
+        if not IrModel or not IrFields:
+            print("Warning: Introspection models not loaded.")
+            return
+
+        # Explicitly init basic tables for these 2 essential models (DEV MODE ONLY)
+        import os
+        if os.getenv('ENV_TYPE') == 'dev':
+            await IrModel._auto_init(cr)
+            await IrFields._auto_init(cr)
+        else:
+             pass # Production rely on Alembic
         
         # 2. Sync Loop
         env = Environment(cr, uid=1) 
         # Using uid=1 (SysAdmin)
         
         for name, model_cls in cls._models.items():
-            print(f"Init SQL for {name}")
-            # Ensure Table Exists for all models
-            await model_cls._auto_init(cr)
+            # print(f"Init SQL for {name}")
+            # Ensure Table Exists for all models (DEV MODE ONLY)
+            if os.getenv('ENV_TYPE') == 'dev':
+                 await model_cls._auto_init(cr)
             
             # --- Sync ir.model ---
             # Search if exists
