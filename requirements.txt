@@ -11,3 +11,7 @@ asyncpg
 alembic
 sqlalchemy
 redis
+pypika
+alembic
+sqlalchemy
+psycopg2-binary

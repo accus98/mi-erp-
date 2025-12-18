@@ -1,8 +1,112 @@
+try:
+    from pypika import Table, Field, Parameter
+    from pypika.terms import Criterion, Term
+except ImportError:
+    Table, Field, Parameter, Criterion, Term = None, None, None, None, None
+
 class DomainParser:
     """
     Parses Polish Notation Domains into SQL.
-    Example: ['|', ('a', '=', 1), ('b', '=', 2)] -> (a = 1) OR (b = 2)
+    Now supports Pypika for safe Query Building.
     """
+    def parse_pypika(self, domain, table, param_builder):
+        """
+        Parse domain to Pypika Criterion.
+        :param domain: List of polish notation tuples.
+        :param table: Pypika Table object.
+        :param param_builder: SQLParams instance.
+        :return: Pypika Criterion (or None if empty)
+        """
+        if not domain:
+            return None
+            
+        normalized = self._normalize(domain)
+        return self._to_pypika(normalized, table, param_builder)
+
+    def _to_pypika(self, domain, table, param_builder):
+        if not domain: return None
+        
+        stack = []
+        
+        for token in reversed(domain):
+            if token == '!':
+                op = stack.pop()
+                stack.append(op.negate()) # Pypika criterion negation? usually ~op or op.negate()
+            elif token == '&':
+                op1 = stack.pop()
+                op2 = stack.pop()
+                stack.append(op1 & op2)
+            elif token == '|':
+                op1 = stack.pop()
+                op2 = stack.pop()
+                stack.append(op1 | op2)
+            elif isinstance(token, (list, tuple)):
+                # Leaf
+                field_name, operator, value = token
+                field = table[field_name]
+                
+                # Special Cases
+                if (value is False or value is None) and operator in ('=', '!='):
+                    if operator == '=':
+                        stack.append(field.isnull())
+                    elif operator == '!=':
+                        stack.append(field.notnull())
+                    else:
+                        # Fallback for wacky calls
+                         ph = param_builder.add(value)
+                         # We can't express custom op easily in simple pypika field api
+                         # Use criterion from string? No.
+                         # Assume '=' behavior?
+                         stack.append(field == Parameter(ph))
+
+                elif isinstance(value, (list, tuple)) and operator.lower() in ('in', 'not in'):
+                    if not value:
+                         # Empty list IN -> False.
+                         # Pypika doesn't have explicit False criterion?
+                         # Use 1=0
+                         from pypika.terms import BasicCriterion, CustomFunction
+                         # stack.append(BasicCriterion(CustomFunction('1', []), CustomFunction('0', []), '=')) 
+                         # Simpler: table.id.ne(table.id) ? 
+                         stack.append(field != field) 
+                    else:
+                         placeholders = []
+                         for v in value:
+                             placeholders.append(Parameter(param_builder.add(v)))
+                         
+                         if operator.lower() == 'in':
+                             stack.append(field.isin(placeholders))
+                         else:
+                             stack.append(field.notin(placeholders))
+                elif operator == 'ilike':
+                     ph = param_builder.add(value)
+                     stack.append(field.ilike(Parameter(ph)))
+                elif operator == 'like':
+                     ph = param_builder.add(value)
+                     stack.append(field.like(Parameter(ph)))
+                elif operator == '>':
+                     ph = param_builder.add(value)
+                     stack.append(field > Parameter(ph))
+                elif operator == '<':
+                     ph = param_builder.add(value)
+                     stack.append(field < Parameter(ph))
+                elif operator == '>=':
+                     ph = param_builder.add(value)
+                     stack.append(field >= Parameter(ph))
+                elif operator == '<=':
+                     ph = param_builder.add(value)
+                     stack.append(field <= Parameter(ph))
+                elif operator == '!=':
+                     ph = param_builder.add(value)
+                     stack.append(field != Parameter(ph))
+                else:
+                     # Default '='
+                     ph = param_builder.add(value)
+                     stack.append(field == Parameter(ph))
+        
+        if not stack:
+             return None
+        return stack[0]
+
     def parse(self, domain, param_builder=None):
         """
         Parse domain to SQL.

@@ -5,6 +5,7 @@ from .registry import Registry
 from .fields import Field, Integer, Datetime, Many2one, One2many, Many2many, Binary, Char, Text
 from .db_async import AsyncDatabase
 import json
+from pypika import Query, Table, Field as PypikaField, Order, Parameter
 
 class MetaModel(type):
     def __new__(mcs, name, bases, attrs):
@@ -96,6 +97,7 @@ class Model(metaclass=MetaModel):
         self.ids = tuple(ids)
         self._prefetch_ids = prefetch_ids if prefetch_ids is not None else set(self.ids)
         self._prefetch_ids.update(self.ids)
+        self._force_rules = False
 
     def __iter__(self):
         for id_val in self.ids:
@@ -137,7 +139,17 @@ class Model(metaclass=MetaModel):
              self.ensure_one()
              key = (self._name, self.ids[0], name)
              if key in self.env.cache:
-                 return self.env.cache[key]
+                 val = self.env.cache[key]
+                 field = self._fields[name]
+                 if field._type == 'many2one':
+                     if not val:
+                         # Return empty recordset (singleton?) or None?
+                         # Odoo standard: Empty RecordSet (False logic)
+                         return self.env[field.comodel_name].browse([]) 
+                     return self.env[field.comodel_name].browse(val)
+                 elif field._type in ('one2many', 'many2many'):
+                     return self.env[field.comodel_name].browse(val or [])
+                 return val
              else:
                  # Async Trap: We can't await here.
                  # If value not in cache, we technically should error or return None?
@@ -356,17 +368,19 @@ class Model(metaclass=MetaModel):
     
     async def _apply_ir_rules(self, operation='read', param_builder=None):
         """
-        Fetch and evaluate rules for current user and model.
-        Returns: (where_clause, params) SQL fragment AND-ed.
-        If param_builder provided, returns params=[] and clause has $n.
+        Fetch and evaluate rules.
+        Returns: Pypika Criterion (or None).
+        
+        NOTE: Calling code must handle None.
+        If param_builder provided, placeholders are managed there.
         """
-        if self.env.uid == 1:
-            return "", []
+        if self.env.uid == 1 and not self._force_rules: # Allow forcing rules even for admin if needed? No standard.
+            return None
             
         if self._name == 'ir.rule':
-             return "", []
+             return None
 
-        # Direct SQL to avoid recursion hell during bootstrap
+        # Direct SQL to avoid recursion hell
         perm_map = {
             'read': 'perm_read',
             'write': 'perm_write',
@@ -376,6 +390,7 @@ class Model(metaclass=MetaModel):
         col = perm_map.get(operation, 'perm_read')
         
         from .tools.sql import SQLParams
+        # We need a builder for the rule query itself
         sql = SQLParams()
         p_model = sql.add(self._name)
         
@@ -388,10 +403,13 @@ class Model(metaclass=MetaModel):
         rows = self.env.cr.fetchall()
         
         if not rows:
-            return "", []
+            return None
             
         from .tools.domain_parser import DomainParser
         parser = DomainParser()
+        
+        # Pypika Table
+        from pypika import Table
         
         global_domains = []
         user_obj = self.env.user 
@@ -408,37 +426,43 @@ class Model(metaclass=MetaModel):
             domain_str = r[0]
             if not domain_str: continue
             try:
-                # Audit Remediation: Use safe_eval
                 d = safe_eval(domain_str, eval_context)
                 global_domains.append(d)
             except Exception as e:
                 print(f"Rule Eval Error on {self._name}: {e}")
                 
         if not global_domains:
-            return "", []
+            return None
             
-        full_sql_parts = []
-        full_params = []
+        # Combine Criteria
+        full_criterion = None
         
+        # Pypika Table for the current model
+        p_table = Table(self._table)
+
         for d in global_domains:
-            # Pass our param_builder if provided
-            # If param_builder is None, parser returns %s and simple_params list
-            clause, simple_params = parser.parse(d, param_builder=param_builder)
+            # We must use the caller's param_builder if available
+            # If not, we create one locally? 
+            # If caller didn't provide param_builder, we can't easily return just a criterion 
+            # because parameters would be lost?
+            # Actually, this refactor assumes caller provides param_builder or we handle it.
+            # For backward compat, if no param_builder, we might need to return (sql, params).
+            # BUT we are changing all callers. So let's enforce param_builder or Create one?
+            # If we create one, we must return parameters.
+            # Let's support both modes but prefer Pypika Object return.
             
-            if clause != "1=1":
-                full_sql_parts.append(f"({clause})")
-                if not param_builder:
-                    full_params.extend(simple_params)
+            crit = parser.parse_pypika(d, p_table, param_builder)
+            if crit:
+                if full_criterion is None:
+                    full_criterion = crit
+                else:
+                    full_criterion = full_criterion & crit
                 
-        if not full_sql_parts:
-             return "", []
-             
-        return " AND ".join(full_sql_parts), full_params
+        return full_criterion
 
     def _validate_order(self, order):
         if not order: return None
         
-        parts = order.split(',')
         safe_parts = []
         
         for part in parts:
@@ -527,57 +551,84 @@ class Model(metaclass=MetaModel):
         await self.check_access_rights('read')
         
         from .tools.sql import SQLParams
-        sql = SQLParams()
+        sql = SQLParams() # Parameter Collector
         
+        # Pypika Table
+        from pypika import Table, Order
+        t = Table(self._table)
+        q = Query.from_(t).select(t.id)
+
         # Cursor Pagination Logic
         search_domain = (domain or []).copy()
         if cursor:
-             # Cursor usually means 'after this ID'
-             # Assuming standard integer ID cursor
              search_domain.append(('id', '>', cursor))
 
-        # 1. Base Domain (Native $n)
+        # 1. Base Domain
         parser = DomainParser()
-        where_clause, _ = parser.parse(search_domain, param_builder=sql)
+        base_criterion = parser.parse_pypika(search_domain, t, param_builder=sql)
         
-        # 2. Apply Security Rules (Native $n)
-        rule_clause, _ = await self._apply_ir_rules('read', param_builder=sql)
+        # 2. Apply Security Rules
+        rule_criterion = await self._apply_ir_rules('read', param_builder=sql)
         
-        # Merge Clauses
-        if rule_clause:
-            if where_clause == "1=1":
-                where_clause = rule_clause
+        # Combine
+        final_criterion = base_criterion
+        if rule_criterion:
+            if final_criterion:
+                final_criterion = final_criterion & rule_criterion
             else:
-                where_clause = f"({where_clause}) AND ({rule_clause})"
+                final_criterion = rule_criterion
         
-        # 3. Build Query using Pypika (Audit Remediation)
-        from .tools.query import QueryBuilder
-        qb = QueryBuilder(self._table).select('id')
-        base_query = qb.get_sql()
+        if final_criterion:
+            q = q.where(final_criterion)
         
-        # Append WHERE clause manually (Hybrid approach)
-        query = f'{base_query} WHERE {where_clause}'
-        
+        # Order By
         if order:
-            # Secure Validation
-            safe_order = self._validate_order(order)
-            if safe_order:
-                query += f" ORDER BY {safe_order}"
+            # We reuse _validate_order but need to parse it for Pypika or use custom string?
+            # Pypika allows raw string only via special methods or we parse standard Odoo syntax "field desc, field2 asc"
+            # Let's parse it safely.
+            parts = order.split(',')
+            for part in parts:
+                part = part.strip()
+                if not part: continue
+                tokens = part.split()
+                f_name = tokens[0]
+                direction = tokens[1].upper() if len(tokens) > 1 else 'ASC'
+                
+                # Security Check (Basic check vs _fields)
+                if f_name not in self._fields and f_name not in ('id', 'create_date', 'write_date'):
+                     continue # Ignore invalid fields to avoid crash or injection risk via Order
+                
+                # Determine Pypika Field
+                # If f_name is just 'name', t.name.
+                p_field = t[f_name]
+                p_order = Order.desc if direction == 'DESC' else Order.asc
+                q = q.orderby(p_field, order=p_order)
         
         if limit:
-            query += f" LIMIT {limit}"
+            q = q.limit(limit)
             
         if offset:
-            query += f" OFFSET {offset}"
+            q = q.offset(offset)
         
-        await self.env.cr.execute(query, sql.get_params())
+        # Execute
+        # get_sql generates the SQL string. We have params in `sql`.
+        query_str = q.get_sql()
+        
+        await self.env.cr.execute(query_str, sql.get_params())
         res = self.env.cr.fetchall()
-        res_ids = [r[0] for r in res]
         
+        res_ids = []
+        for r in res:
+            # Pypika / DB returns tuple or Record. Access by index 0.
+            if isinstance(r, (tuple, list)):
+                res_ids.append(r[0])
+            else:
+                # AsyncPG Record?
+                res_ids.append(r['id'])
+
         records = self.browse(res_ids)
         
         if include and res_ids:
-            # Eager Loading Hint
             await records.read(include)
             
         return records
@@ -587,42 +638,44 @@ class Model(metaclass=MetaModel):
         Verifies that the current records satisfy the Record Rules.
         Raises AccessError if any record is forbidden.
         """
-        if self.env.uid == 1: return
+        if self.env.uid == 1 and not self._force_rules: return
         if not self.ids: return
         
         from .tools.sql import SQLParams
         
-        # 1. Prepare Rule Clause (Native $n) ONCE
-        # We use a temp builder just to generate the clause and extract params
+        # 1. Prepare Rule Criterion
         rule_builder = SQLParams()
-        rule_clause, _ = await self._apply_ir_rules(operation, param_builder=rule_builder)
+        rule_criterion = await self._apply_ir_rules(operation, param_builder=rule_builder)
         
-        if not rule_clause: return
+        if not rule_criterion: return
 
-        rule_params = rule_builder.get_params()
-        rule_params_count = len(rule_params)
-        
         # Verify all IDs match the rule
         all_ids = list(self.ids)
         total_requested = len(all_ids)
         total_matched = 0
         
+        from pypika import Table, functions
+        t = Table(self._table)
+        
         chunk_size = 1000
         for i in range(0, total_requested, chunk_size):
             chunk = all_ids[i:i + chunk_size]
             
-            sql = SQLParams()
+            # Create a Chunk Builder starting where rule_builder left off
+            chunk_builder = SQLParams(start_index=rule_builder.index)
+            # Copy pre-existing rule params
+            chunk_builder.params = list(rule_builder.params)
             
-            # Optimization: Pre-inject rule params so $1..$R match rule_clause
-            sql.params.extend(rule_params)
-            sql.index += rule_params_count
+            # Helper: Add IDs
+            id_params = []
+            for id_val in chunk:
+                 id_params.append(Parameter(chunk_builder.add(id_val)))
             
-            # Now add IDs. They will start at $R+1
-            id_placeholders = sql.add_many(chunk)
+            q = Query.from_(t).select(functions.Count('*')).where(rule_criterion).where(t.id.isin(id_params))
             
-            query = f'SELECT COUNT(*) FROM "{self._table}" WHERE id IN ({id_placeholders}) AND ({rule_clause})'
+            query = q.get_sql()
             
-            await self.env.cr.execute(query, sql.get_params())
+            await self.env.cr.execute(query, chunk_builder.get_params())
             res = self.env.cr.fetchone()
             if res:
                 total_matched += res[0]
@@ -660,40 +713,40 @@ class Model(metaclass=MetaModel):
         if fields is None:
             fields = [f for f in self._fields if self._fields[f]._sql_type]
             
-        # Apply Record Rules (Native SQL)
+        # Pypika Setup
+        from pypika import Table, Parameter
+        t = Table(self._table)
         from .tools.sql import SQLParams
+        
+        # 1. Main Query Rule Setup
         rule_builder = SQLParams()
-        rule_clause, _ = await self._apply_ir_rules('read', param_builder=rule_builder)
-
+        rule_criterion = await self._apply_ir_rules('read', param_builder=rule_builder)
+        
         # Filter valid SQL columns
         sql_fields = [f for f in fields if f in self._fields and self._fields[f]._sql_type]
         
+        
+        rows = []
         if sql_fields:
-            if 'id' not in sql_fields: sql_fields.insert(0, 'id')
-            cols = ", ".join([f'"{f}"' for f in sql_fields])
-            
-            sql = SQLParams()
-            
-            # Pre-inject Rule Params ($1..$R)
-            if rule_clause:
-                sql.params.extend(rule_builder.get_params())
-                sql.index += len(rule_builder.get_params())
-            
-            # Inject IDs ($R+1..)
-            ids_input = list(self.ids)
-            placeholders = sql.add_many(ids_input)
-            
-            where_sql = f'id IN ({placeholders})'
-            if rule_clause:
-                where_sql += f' AND ({rule_clause})'
-            
-            query = f'SELECT {cols} FROM "{self._table}" WHERE {where_sql}'
-
-            
-            await self.env.cr.execute(query, sql.get_params())
-            rows = self.env.cr.fetchall() 
-        else:
-            rows = []
+             if 'id' not in sql_fields: sql_fields.insert(0, 'id')
+             
+             # Use Pypika Select
+             q = Query.from_(t).select(*sql_fields)
+             
+             main_builder = SQLParams(start_index=rule_builder.index)
+             main_builder.params = list(rule_builder.params)
+             
+             ids_input = list(self.ids)
+             id_params = []
+             for id_val in ids_input:
+                  id_params.append(Parameter(main_builder.add(id_val)))
+ 
+             q = q.where(t.id.isin(id_params))
+             if rule_criterion:
+                  q = q.where(rule_criterion)
+                  
+             await self.env.cr.execute(q.get_sql(), main_builder.get_params())
+             rows = self.env.cr.fetchall() 
         
         # Map by ID
         rows_map = {r['id']: r for r in rows}
@@ -705,7 +758,7 @@ class Model(metaclass=MetaModel):
                 for f in sql_fields:
                     self.env.cache[(self._name, id_val, f)] = row[f]
         
-        # 2. Relational Prefetching (N+1 Fix)
+        # 2. Relational Prefetching (N+1 Fix / Pypika Refactor)
         relational_fields = [f for f in fields if f in self._fields and not self._fields[f]._sql_type]
         
         for f in relational_fields:
@@ -716,10 +769,15 @@ class Model(metaclass=MetaModel):
             if isinstance(field, Many2many):
                 if not field.relation: continue
                 
+                # M2M Query
                 sql_m2m = SQLParams()
-                placeholders = sql_m2m.add_many(ids_to_fetch)
-                q = f'SELECT "{field.column1}", "{field.column2}" FROM "{field.relation}" WHERE "{field.column1}" IN ({placeholders})'
-                await self.env.cr.execute(q, sql_m2m.get_params())
+                # Pypika
+                t_rel = Table(field.relation)
+                p_ids = [Parameter(sql_m2m.add(i)) for i in ids_to_fetch]
+                
+                q = Query.from_(t_rel).select(field.column1, field.column2).where(t_rel[field.column1].isin(p_ids))
+                
+                await self.env.cr.execute(q.get_sql(), sql_m2m.get_params())
                 relations = self.env.cr.fetchall()
                 
                 rel_map = {rid: [] for rid in ids_to_fetch}
@@ -737,11 +795,14 @@ class Model(metaclass=MetaModel):
                 if inv_field not in Comodel._fields: continue
                 inv_col = Comodel._fields[inv_field].name
                 
+                # O2M Query
                 sql_o2m = SQLParams()
-                placeholders = sql_o2m.add_many(ids_to_fetch)
-
-                q = f'SELECT id, "{inv_col}" FROM "{Comodel._table}" WHERE "{inv_col}" IN ({placeholders})'
-                await self.env.cr.execute(q, sql_o2m.get_params())
+                t_co = Table(Comodel._table)
+                p_ids = [Parameter(sql_o2m.add(i)) for i in ids_to_fetch]
+                
+                q = Query.from_(t_co).select(t_co.id, t_co[inv_col]).where(t_co[inv_col].isin(p_ids))
+                
+                await self.env.cr.execute(q.get_sql(), sql_o2m.get_params())
                 relations = self.env.cr.fetchall()
                 
                 rel_map = {rid: [] for rid in ids_to_fetch}
@@ -807,10 +868,163 @@ class Model(metaclass=MetaModel):
     async def search_read(self, domain=None, fields=None, offset=0, limit=None, order=None, cursor=None):
         """
         Combines search and read.
+        Optimized with JOINs for simple M2O cases.
         """
+        # 1. Determine Fields
+        if not fields:
+            fields = [f for f in self._fields if self._fields[f]._sql_type]
+            
+        # 2. Check Optimization (Stored + M2O only)
+        # We only optimize if all fields are M2O or Simple SQL types.
+        # No M2M, O2M, or Non-Stored Compute.
+        can_optimize = True
+        join_fields = [] # List of (field_name, FieldObj)
+        
+        for f in fields:
+            if f not in self._fields: continue
+            if f == 'id': continue
+            field = self._fields[f]
+            
+            if not field.store or not field._sql_type:
+                can_optimize = False
+                break
+                
+            if field._type == 'many2one':
+                join_fields.append((f, field))
+            elif field._type in ('one2many', 'many2many', 'binary'):
+                can_optimize = False # Avoid join explosion or complexity
+                break
+        
+        if can_optimize:
+             try:
+                 return await self._search_read_optimized(domain, fields, offset, limit, order, join_fields)
+             except Exception as e:
+                 print(f"Optimization Warn: {e}. Falling back to standard.")
+                 # Fallback
+        
         records = await self.search(domain or [], offset=offset, limit=limit, order=order, cursor=cursor)
         if not records: return []
         return await records.read(fields)
+
+    async def _search_read_optimized(self, domain, fields, offset, limit, order, join_fields):
+        from .tools.domain_parser import DomainParser
+        from .tools.sql import SQLParams
+        from pypika import Table, Order, Field as PypikaField
+        
+        t = Table(self._table)
+        q = Query.from_(t).select(t.id)
+        
+        # Select Simple Fields
+        for f in fields:
+            if f in self._fields and self._fields[f]._sql_type and f not in [j[0] for j in join_fields]:
+                q = q.select(t[f])
+                
+        # Handle Joins
+        # M2O: LEFT JOIN comodel c ON t.field = c.id
+        # Select: c.id, c.name (OR rec_name)
+        
+        # Map for result processing
+        # {field_name: { 'alias_id': 'alias_id', 'alias_name': 'alias_name' }}
+        join_map = {} 
+        
+        for fname, field in join_fields:
+            Comodel = self.env[field.comodel_name]
+            t_co = Table(Comodel._table)
+            
+            # Unique Alias for Join Table
+            alias = f"{fname}_join"
+            t_join = t_co.as_(alias)
+            
+            q = q.left_join(t_join).on(t[fname] == t_join.id)
+            
+            # Select ID and Name
+            col_id = f"{fname}_id_val"
+            col_name = f"{fname}_name_val"
+            
+            q = q.select(t_join.id.as_(col_id))
+            # Assuming 'name' field exists on Comodel for now
+            # TODO: robust rec_name support
+            q = q.select(t_join.name.as_(col_name))
+            
+            join_map[fname] = {'id': col_id, 'name': col_name}
+            
+            # Also select the raw foreign key on main table?
+            # It's already checked via 't[f]'? 
+            # If we requested 'partner_id', we want (id, name).
+            # We don't need t.partner_id unless for debugging.
+            
+        # Domain (Base + Security)
+        sql = SQLParams()
+        parser = DomainParser()
+        # TODO: parser needs to use 't' (main table) aliases?
+        # Our parser uses plain field names. Pypika will resolve to 't' if only 1 table.
+        # But we Joined.
+        # DomainParser might generate "field", which is ambiguous?
+        # Pypika usually handles "field" as belonging to FROM table if unambiguous.
+        # But if Joined tables have same fields?
+        # DomainParser current impl uses f'"{field}" {op} %s'.
+        # This is raw SQL string criterion.
+        # 'SELECT ... FROM t ... WHERE "field" = $1'.
+        # If "field" exists in joined table, it's ambiguous.
+        # Usually M2O fields are unique to model.
+        # But 'name', 'create_date' exist in both.
+        # We must prefix with table alias: "table"."field".
+        # DomainParser needs update to accept Table alias?
+        # parser.parse_pypika(..., table=t).
+        # Yes, I updated parse_pypika to take 'table'.
+        
+        base_criterion = parser.parse_pypika(domain or [], t, param_builder=sql)
+        rule_criterion = await self._apply_ir_rules('read', param_builder=sql) # Rules usually on 'read'
+        
+        if base_criterion: q = q.where(base_criterion)
+        if rule_criterion: q = q.where(rule_criterion)
+        
+        # Order
+        if order:
+            parts = order.split(',')
+            for part in parts:
+                part = part.strip()
+                if not part: continue
+                tokens = part.split()
+                f_name = tokens[0]
+                direction = tokens[1].upper() if len(tokens) > 1 else 'ASC'
+                if f_name in self._fields:
+                    p_order = Order.desc if direction == 'DESC' else Order.asc
+                    q = q.orderby(t[f_name], order=p_order)
+                    
+        if limit: q = q.limit(limit)
+        if offset: q = q.offset(offset)
+        
+        await self.env.cr.execute(q.get_sql(), sql.get_params())
+        rows = self.env.cr.fetchall()
+        
+        # Process Results
+        results = []
+        for r in rows:
+            # r is asyncpg Record (dict-like)
+            res = {}
+            # ID
+            res['id'] = r['id']
+            
+            for f in fields:
+                if f == 'id': continue
+                
+                if f in join_map:
+                    # M2O Joined
+                    jid = r.get(join_map[f]['id'])
+                    jname = r.get(join_map[f]['name'])
+                    if jid:
+                        res[f] = (jid, jname)
+                    else:
+                        res[f] = False
+                elif f in self._fields:
+                    # Simple Field
+                    res[f] = r.get(f) # might use alias if collision?
+                    # Pypika select(t[f]) uses 'f' as name unless aliased.
+                    
+            results.append(res)
+            
+        return results
 
     def _process_one2many(self, record, field_name, commands):
         """
@@ -984,48 +1198,42 @@ class Model(metaclass=MetaModel):
         created_ids = []
         
         if not sql_vals_list:
-             # Empty inserts? (e.g. only default values or empty)
-             # If processed_vals_list has items but no valid cols?
-             # INSERT DEFAULT VALUES
+             # Empty inserts (default values)
              for _ in processed_vals_list:
                  await self.env.cr.execute(f'INSERT INTO "{self._table}" DEFAULT VALUES RETURNING id')
                  res = self.env.cr.fetchone()
                  created_ids.append(res['id'])
         else:
-            # Construct Massive Query
-            # INSERT INTO table (c1, c2) VALUES ($1, $2), ($3, $4) ... RETURNING id
-            cols_clause = ", ".join([f'"{c}"' for c in valid_cols])
+            # Pypika Insert
+            from pypika import Table, Parameter
+            t = Table(self._table)
+            
+            # Columns
+            # Pypika .columns('a', 'b') works with strings
+            q = Query.into(t).columns(*valid_cols)
             
             from .tools.sql import SQLParams
             sql = SQLParams()
             
-            # Values clauses
-            values_clauses = []
-            
+            # Add Rows
             for row in sql_vals_list:
-                row_values = [row[c] for c in valid_cols]
-                # Add values to builder, get "$k, $k+1..." string
-                row_ph = sql.add_many(row_values) 
-                values_clauses.append(f"({row_ph})")
+                row_values = []
+                for c in valid_cols:
+                    # Get value
+                     val = row[c]
+                     # Add to params, get $n
+                     ph = sql.add(val)
+                     # Add Parameter wrapper for Pypika
+                     row_values.append(Parameter(ph))
+                
+                q = q.insert(*row_values)
             
-            values_clause = ", ".join(values_clauses)
+            # RETURNING id (Postgres specific in Pypika)
+            q = q.returning(t.id)
             
-            query = f'INSERT INTO "{self._table}" ({cols_clause}) VALUES {values_clause} RETURNING id'
+            await self.env.cr.execute(q.get_sql(), sql.get_params())
             
-            # Execute Native (Bypass _convert_sql_params if SQLParams produced $1)
-            # But db_async.py still calls _convert_sql_params?
-            # Ideally we modify execute to skip conversion if it sees $1?
-            # Or we trust that _convert_sql_params is idempotent on $1? 
-            # Psycopg2 style %s conversion might mess up $1 if not careful?
-            # sqlparams library specifically converts named/pyformat to numeric.
-            # If we pass numeric $1 it *should* limit damage or ignore.
-            # I will trust it for now, or user requested removing the bottleneck.
-            # For now I am removing the '%s' bottleneck in ORM.
-            
-            await self.env.cr.execute(query, sql.get_params())
-            
-            # Fetch All IDs
-            rows = self.env.cr.fetchall() # returns list of Records/Dicts
+            rows = self.env.cr.fetchall()
             created_ids = [r['id'] for r in rows]
 
         # 4. Update Cache (Batch)
@@ -1133,19 +1341,25 @@ class Model(metaclass=MetaModel):
             from .tools.sql import SQLParams
             sql = SQLParams()
             
+            # Pypika Update
+            from pypika import Table, Parameter
+            t = Table(self._table)
+            q = Query.update(t)
+            
             # SET clause
-            set_parts = []
             for k in valid_cols:
-                p = sql.add(vals[k])
-                set_parts.append(f'"{k}" = {p}')
-            set_clause = ", ".join(set_parts)
+                 p = sql.add(vals[k])
+                 q = q.set(t[k], Parameter(p))
             
             # WHERE clause
             ids_list = list(self.ids)
-            id_placeholders = sql.add_many(ids_list)
-
-            query = f'UPDATE "{self._table}" SET {set_clause} WHERE id IN ({id_placeholders})'
-            await self.env.cr.execute(query, sql.get_params())
+            id_params = []
+            for id_val in ids_list:
+                id_params.append(Parameter(sql.add(id_val)))
+            
+            q = q.where(t.id.isin(id_params))
+            
+            await self.env.cr.execute(q.get_sql(), sql.get_params())
             
             for id_val in self.ids:
                 for k, v in vals.items():
@@ -1200,11 +1414,17 @@ class Model(metaclass=MetaModel):
                     for tid in adding: to_insert.append((rid, tid))
                     for tid in removing: to_delete_params.append((rid, tid))
                          
+                t_rel = Table(f_obj.relation)
+                c1 = f_obj.column1
+                c2 = f_obj.column2
+                
                 if to_delete_params:
-                     await self.env.cr.executemany(f'DELETE FROM "{f_obj.relation}" WHERE "{f_obj.column1}" = $1 AND "{f_obj.column2}" = $2', to_delete_params)
-
+                     q_del = Query.from_(t_rel).where(t_rel[c1] == Parameter('$1')).where(t_rel[c2] == Parameter('$2')).delete()
+                     await self.env.cr.executemany(q_del.get_sql(), to_delete_params)
+ 
                 if to_insert:
-                    await self.env.cr.executemany(f'INSERT INTO "{f_obj.relation}" ("{f_obj.column1}", "{f_obj.column2}") VALUES ($1, $2)', to_insert)
+                     q_ins = Query.into(t_rel).columns(c1, c2).insert(Parameter('$1'), Parameter('$2'))
+                     await self.env.cr.executemany(q_ins.get_sql(), to_insert)
                           
         if o2m_values:
             for record in self:

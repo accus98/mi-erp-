@@ -277,6 +277,7 @@ class AsyncCursor:
         DO NOT USE FOR EXECUTION.
         Returns bytes (mocking psycopg2) or str.
         """
+        print("WARNING: 'mogrify' is deprecated and unsafe. Use parameterized queries.")
         try:
              # Very basic simulation: try generic python formatting
              # This handles %s -> value textual replacement

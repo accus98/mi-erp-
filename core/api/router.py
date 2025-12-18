@@ -1,28 +1,101 @@
-
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from core.db_async import AsyncDatabase
 from core.env import Environment
-from core.api.schema import get_pydantic_model, GenericResponse
+from core.api.schema import get_pydantic_model, GenericResponse, LoginRequest, CallKwRequest
+from core.session import Session, get_session
 from typing import List, Any
 from pydantic import ValidationError
 import logging
+import inspect
 
 api_router = APIRouter(prefix="/api")
 
 # Dependency to get Async Env
-# Replicates core/http_fastapi.py logic but cleaner for API
-async def get_env(request: Request):
-    # Retrieve session from middleware/dependency
-    # For now, let's assume session is attached to request or passed via token header
-    # Simple Mock for MVP:
-    uid = 1 # Admin default
+async def get_env(session: Session = Depends(get_session)):
+    uid = session.uid
+    context = session.context
     
-    # We need to acquire a connection
-    # FastAPI dependency with yield is perfect for resource management
     async with AsyncDatabase.acquire() as cr:
-         env = Environment(cr, uid=uid)
-         await env.prefetch_user()
+         if uid:
+             await cr.execute(f"SET LOCAL app.current_uid = '{uid}'")
+         
+         env = Environment(cr, uid=uid, context=context)
+         if uid:
+             await env.prefetch_user()
          yield env
+
+@api_router.post("/call", response_model=GenericResponse)
+async def call(request: CallKwRequest, env: Environment = Depends(get_env)):
+    """
+    Generic execution endpoint.
+    JSON: {model, method, args, kwargs}
+    """
+    uid = env.uid
+    model_name = request.model
+    method_name = request.method
+    args = request.args
+    kwargs = request.kwargs
+    
+    print(f"DEBUG API CALL: {model_name}.{method_name} as {uid}")
+    
+    # Validation
+    if not env.registry.get(model_name):
+         raise HTTPException(status_code=404, detail=f"Model {model_name} not found")
+         
+    Model = env[model_name]
+    
+    try:
+         # Handle Instance Methods (args[0] is list of IDs)
+         instance_methods = ['read', 'write', 'unlink', 'check_access_rights', 'name_get']
+         is_instance_call = method_name in instance_methods or (args and isinstance(args[0], list) and method_name not in ['search', 'search_count', 'create', 'search_read', 'name_search'])
+         
+         if is_instance_call and args and isinstance(args[0], list):
+             ids = args[0]
+             method_args = args[1:]
+             record = Model.browse(ids)
+             method = getattr(record, method_name)
+             result = method(*method_args, **kwargs)
+         else:
+             method = getattr(Model, method_name)
+             result = method(*args, **kwargs)
+         
+         if inspect.iscoroutine(result):
+             result = await result
+
+         if hasattr(result, 'ids'):
+              result = result.ids
+              
+         return GenericResponse(success=True, data=result)
+         
+    except Exception as e:
+         import traceback
+         traceback.print_exc()
+         return GenericResponse(success=False, message=str(e))
+
+@api_router.post("/login", response_model=GenericResponse)
+async def login(request: LoginRequest, session: Session = Depends(get_session)):
+    print(f"DEBUG LOGIN ROUTE: {request.login} {request.password}")
+    # 1. Create Sudo Env for Auth Check
+    async with AsyncDatabase.acquire() as cr:
+         sudo_env = Environment(cr, uid=1)
+         Users = sudo_env['res.users']
+         
+         # 2. Check Credentials
+         uid = await Users._check_credentials(request.login, request.password)
+         print(f"DEBUG LOGIN UID: {uid}")
+         
+         if uid:
+             session.rotate()
+             session.uid = uid
+             session.login = request.login
+             session.save()
+             return GenericResponse(success=True, data={'uid': uid, 'session_id': session.sid})
+         else:
+             # return 401? Or success=False?
+             # GenericResponse suggests success=False logic usually?
+             # But 401 is more RESTful.
+             # Legacy main.py returns 401.
+             raise HTTPException(status_code=401, detail="Access Denied")
 
 @api_router.get("/{model}", response_model=GenericResponse)
 async def list_records(model: str, env: Environment = Depends(get_env)):

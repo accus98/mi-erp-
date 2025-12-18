@@ -31,9 +31,12 @@ class Registry:
     async def setup_models(cls, cr):
         """
         Synchronize Python models with Database (ir.model, ir.model.fields).
+        Note: Table creation (_auto_init) is deprecated in favor of Alembic.
         """
         from core.env import Environment
         print("Syncing models to database...")
+        print("WARNING: _auto_init is active. Ensure Alembic migrations are applied for schema management.")
+
         # 1. Ensure ir.model and ir.model.fields tables exist first
         # We need to manually init them because they are in the registry but
         # might depend on themselves.
