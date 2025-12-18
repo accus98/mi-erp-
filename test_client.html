@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Nexo Real-Time Test</title>
+</head>
+
+<body>
+    <h2>🚀 Monitor de Cambios en Vivo</h2>
+    <div id="status" style="color: gray">Desconectado</div>
+    <ul id="events"></ul>
+
+    <script>
+        const ws = new WebSocket("ws://localhost:8000/ws/notifications");
+
+        ws.onopen = () => {
+            document.getElementById("status").innerText = "🟢 Conectado al Bus";
+            document.getElementById("status").style.color = "green";
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            const li = document.createElement("li");
+            li.innerText = `[${new Date().toLocaleTimeString()}] 📢 Cambio en ${data.model} (ID: ${data.ids}): ${data.type}`;
+            // Efecto visual "Flash" para demostrar velocidad
+            li.style.backgroundColor = "yellow";
+            setTimeout(() => li.style.backgroundColor = "transparent", 500);
+
+            document.getElementById("events").prepend(li);
+        };
+
+        ws.onclose = () => {
+            document.getElementById("status").innerText = "🔴 Desconectado";
+            document.getElementById("status").style.color = "red";
+        };
+    </script>
+</body>
+
+</html>

@@ -103,6 +103,15 @@ class DomainParser:
                         else:
                             stack.append(f"to_tsvector('{config}', \"{field}\") @@ plainto_tsquery('{config}', %s)")
                             params.append(value)
+                    elif operator == 'search':
+                        # Google-style Full-Text Search
+                        config = 'spanish'
+                        if param_builder:
+                            ph = param_builder.add(value)
+                            stack.append(f"to_tsvector('{config}', \"{field}\") @@ plainto_tsquery('{config}', {ph})")
+                        else:
+                            stack.append(f"to_tsvector('{config}', \"{field}\") @@ plainto_tsquery('{config}', %s)")
+                            params.append(value)
                     else:
                         if param_builder:
                             ph = param_builder.add(value)

@@ -58,10 +58,8 @@ async def test_full_text():
         env = Environment(cr, uid=1, context={})
         doc_model = Document(env)
         
-        # Search using implicit @@ via domain
-        # The parser expects ['field', '@@', 'value']
-        # 'quijote' should match 'Quijote' in Spanish config
-        results = await doc_model.search([('title', '@@', 'quijote')])
+        # Search using explicit 'search' operator
+        results = await doc_model.search([('title', 'search', 'quijote')])
         
         print(f"Docs found: {len(results)}")
         if results:
