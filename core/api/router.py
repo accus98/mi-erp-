@@ -4,6 +4,7 @@ from core.db_async import AsyncDatabase
 from core.env import Environment
 from core.api.schema import get_pydantic_model, GenericResponse
 from typing import List, Any
+from pydantic import ValidationError
 import logging
 
 api_router = APIRouter(prefix="/api")
@@ -52,13 +53,19 @@ async def create_record(model: str, payload: dict, env: Environment = Depends(ge
     if not env.registry.get(model):
         raise HTTPException(status_code=404, detail="Model not found")
     
-    # TODO: Validate payload with get_pydantic_model(env[model], 'write')
-    # For now, simplistic generic dict pass-through to ORM
-    
     try:
+        PayloadModel = get_pydantic_model(env[model], 'create')
+        validated = PayloadModel(**payload)
+        data = validated.dict(exclude_unset=True)
+        
         Model = env[model]
-        new_record = await Model.create(payload)
+        new_record = await Model.create(data)
         return GenericResponse(success=True, data={'id': new_record.id})
+    except GenericResponse as e:
+        # Pydantic validation error if we imported it? No, explicit check below
+        raise e
+    except ValidationError as e:
+         raise HTTPException(status_code=422, detail=e.errors())
     except Exception as e:
         return GenericResponse(success=False, data=None, message=str(e))
 
@@ -73,8 +80,14 @@ async def update_record(model: str, id: int, payload: dict, env: Environment = D
          raise HTTPException(status_code=404, detail="Record not found")
          
     try:
-        await records.write(payload)
+        PayloadModel = get_pydantic_model(env[model], 'write')
+        validated = PayloadModel(**payload)
+        data = validated.dict(exclude_unset=True)
+        
+        await records.write(data)
         return GenericResponse(success=True, data={'id': id})
+    except ValidationError as e:
+         raise HTTPException(status_code=422, detail=e.errors())
     except Exception as e:
         return GenericResponse(success=False, data=None, message=str(e))
 

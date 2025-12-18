@@ -323,10 +323,11 @@ class Model(metaclass=MetaModel):
         return defaults
 
     
-    async def _apply_ir_rules(self, operation='read'):
+    async def _apply_ir_rules(self, operation='read', param_builder=None):
         """
         Fetch and evaluate rules for current user and model.
         Returns: (where_clause, params) SQL fragment AND-ed.
+        If param_builder provided, returns params=[] and clause has $n.
         """
         if self.env.uid == 1:
             return "", []
@@ -388,35 +389,15 @@ class Model(metaclass=MetaModel):
         full_sql_parts = []
         full_params = []
         
-        # DomainParser returns %s currently.
-        # We need to adapt it OR re-index it.
-        # Re-indexing is safer for now without rewriting Parser.
-        # We can append parser params to our native list?
-        # NO. We are returning (sql, params) to caller.
-        # Caller (search/read) will likely use SQLParams.
-        # So we should return native $n IF we can know the offset.
-        # BUT this method doesn't know the offset of the caller.
-        # CRITICAL ARCHITECTURE DECISION:
-        # Either pass `sql_params_builder` into this method, OR return %s and let caller convert?
-        # If we return %s, we defeat the purpose of "removing bottleneck".
-        # We must pass `sql_params` builder or offset.
-        
-        # For now, let's keep it returning %s and handle conversion in Step 2?
-        # User explicitly asked to remove `_convert_sql_params`.
-        # So providing %s is bad.
-        
-        # I'll update signature: `_apply_ir_rules(op, sql_params_builder=None)`
-        # If builder provided, use it.
-        pass
-        # Since I can't update signature easily in this Replace Block without scrolling up...
-        # I will leave this method using %s for now and fix it when refactoring `search`.
-        # I will revert _apply_ir_rules changes in this block and focus on check_access_rights.
-        
         for d in global_domains:
-            sql, params = parser.parse(d)
-            if sql != "1=1":
-                full_sql_parts.append(f"({sql})")
-                full_params.extend(params)
+            # Pass our param_builder if provided
+            # If param_builder is None, parser returns %s and simple_params list
+            clause, simple_params = parser.parse(d, param_builder=param_builder)
+            
+            if clause != "1=1":
+                full_sql_parts.append(f"({clause})")
+                if not param_builder:
+                    full_params.extend(simple_params)
                 
         if not full_sql_parts:
              return "", []
@@ -509,43 +490,34 @@ class Model(metaclass=MetaModel):
         # Implementation needed for create/write
         pass
 
-    async def search(self, domain, offset=0, limit=None, order=None):
+    async def search(self, domain, offset=0, limit=None, order=None, include=None, cursor=None):
         from .tools.domain_parser import DomainParser
         
         await self.check_access_rights('read')
         
-        # 1. Base Domain
-        parser = DomainParser()
-        where_clause, where_params = parser.parse(domain)
-        
-        # 2. Apply Security Rules
-        rule_clause, rule_params = await self._apply_ir_rules('read')
-        
         from .tools.sql import SQLParams
         sql = SQLParams()
         
-        # Convert Domain (%s -> $n)
-        if where_clause != "1=1":
-            converted_where = where_clause
-            for p in where_params:
-                pid = sql.add(p)
-                converted_where = converted_where.replace('%s', pid, 1)
-            where_clause = converted_where
-        else:
-             # Just discard params if "1=1" ? usually params is empty
-             pass
+        # Cursor Pagination Logic
+        search_domain = (domain or []).copy()
+        if cursor:
+             # Cursor usually means 'after this ID'
+             # Assuming standard integer ID cursor
+             search_domain.append(('id', '>', cursor))
+
+        # 1. Base Domain (Native $n)
+        parser = DomainParser()
+        where_clause, _ = parser.parse(search_domain, param_builder=sql)
         
-        # Convert Rules (%s -> $n)
+        # 2. Apply Security Rules (Native $n)
+        rule_clause, _ = await self._apply_ir_rules('read', param_builder=sql)
+        
+        # Merge Clauses
         if rule_clause:
-            converted_rule = rule_clause
-            for p in rule_params:
-                pid = sql.add(p)
-                converted_rule = converted_rule.replace('%s', pid, 1)
-            
             if where_clause == "1=1":
-                where_clause = converted_rule
+                where_clause = rule_clause
             else:
-                where_clause = f"({where_clause}) AND ({converted_rule})"
+                where_clause = f"({where_clause}) AND ({rule_clause})"
         
         # 3. Build Query using Pypika (Audit Remediation)
         from .tools.query import QueryBuilder
@@ -553,8 +525,6 @@ class Model(metaclass=MetaModel):
         base_query = qb.get_sql()
         
         # Append WHERE clause manually (Hybrid approach)
-        # Pypika doesn't easily ingest pre-cooked SQL strings for Where without unsafeness.
-        # But our where_clause is already parameterized ($n) via SQLParams.
         query = f'{base_query} WHERE {where_clause}'
         
         if order:
@@ -573,7 +543,13 @@ class Model(metaclass=MetaModel):
         res = self.env.cr.fetchall()
         res_ids = [r[0] for r in res]
         
-        return self.browse(res_ids)
+        records = self.browse(res_ids)
+        
+        if include and res_ids:
+            # Eager Loading Hint
+            await records.read(include)
+            
+        return records
 
     async def check_access_rule(self, operation):
         """
@@ -583,8 +559,17 @@ class Model(metaclass=MetaModel):
         if self.env.uid == 1: return
         if not self.ids: return
         
-        rule_clause, rule_params = await self._apply_ir_rules(operation)
+        from .tools.sql import SQLParams
+        
+        # 1. Prepare Rule Clause (Native $n) ONCE
+        # We use a temp builder just to generate the clause and extract params
+        rule_builder = SQLParams()
+        rule_clause, _ = await self._apply_ir_rules(operation, param_builder=rule_builder)
+        
         if not rule_clause: return
+
+        rule_params = rule_builder.get_params()
+        rule_params_count = len(rule_params)
         
         # Verify all IDs match the rule
         all_ids = list(self.ids)
@@ -595,31 +580,16 @@ class Model(metaclass=MetaModel):
         for i in range(0, total_requested, chunk_size):
             chunk = all_ids[i:i + chunk_size]
             
-            from .tools.sql import SQLParams
             sql = SQLParams()
             
-            # Placeholders for IDs
+            # Optimization: Pre-inject rule params so $1..$R match rule_clause
+            sql.params.extend(rule_params)
+            sql.index += rule_params_count
+            
+            # Now add IDs. They will start at $R+1
             id_placeholders = sql.add_many(chunk)
             
-            # Rule Params conversion
-            # Since rule_params comes from _apply_ir_rules (which might still be %s based or mixed?)
-            # Currently _apply_ir_rules returns %s. 
-            # We must convert %s in rule_clause to $k, $k+1...
-            # This requires knowing rule_params length.
-            # OR we can assume _apply_ir_rules works.
-            # Wait, I reverted _apply_ir_rules changes partially.
-            # I need to properly upgrade _apply_ir_rules OR handle conversion here.
-            # Hack: convert rule_params manually to sql.add().
-            
-            # BUT rule_clause contains '%s'. SQLParams generates $n. 
-            # We need to replace %s in rule_clause with generated $n.
-            
-            converted_rule_clause = rule_clause
-            for param in rule_params:
-                p = sql.add(param)
-                converted_rule_clause = converted_rule_clause.replace('%s', p, 1)
-            
-            query = f'SELECT COUNT(*) FROM "{self._table}" WHERE id IN ({id_placeholders}) AND ({converted_rule_clause})'
+            query = f'SELECT COUNT(*) FROM "{self._table}" WHERE id IN ({id_placeholders}) AND ({rule_clause})'
             
             await self.env.cr.execute(query, sql.get_params())
             res = self.env.cr.fetchone()
@@ -659,34 +629,35 @@ class Model(metaclass=MetaModel):
         if fields is None:
             fields = [f for f in self._fields if self._fields[f]._sql_type]
             
-        # Apply Record Rules
-        rule_clause, rule_params = await self._apply_ir_rules('read')
+        # Apply Record Rules (Native SQL)
+        from .tools.sql import SQLParams
+        rule_builder = SQLParams()
+        rule_clause, _ = await self._apply_ir_rules('read', param_builder=rule_builder)
 
         # Filter valid SQL columns
         sql_fields = [f for f in fields if f in self._fields and self._fields[f]._sql_type]
-        
-        from .tools.sql import SQLParams
         
         if sql_fields:
             if 'id' not in sql_fields: sql_fields.insert(0, 'id')
             cols = ", ".join([f'"{f}"' for f in sql_fields])
             
             sql = SQLParams()
+            
+            # Pre-inject Rule Params ($1..$R)
+            if rule_clause:
+                sql.params.extend(rule_builder.get_params())
+                sql.index += len(rule_builder.get_params())
+            
+            # Inject IDs ($R+1..)
             ids_input = list(self.ids)
             placeholders = sql.add_many(ids_input)
             
             where_sql = f'id IN ({placeholders})'
-            
             if rule_clause:
-                # Convert rule %s to $n
-                converted_rule = rule_clause
-                for p in rule_params:
-                    pid = sql.add(p)
-                    converted_rule = converted_rule.replace('%s', pid, 1)
-                
-                where_sql += f' AND ({converted_rule})'
+                where_sql += f' AND ({rule_clause})'
             
             query = f'SELECT {cols} FROM "{self._table}" WHERE {where_sql}'
+
             
             await self.env.cr.execute(query, sql.get_params())
             rows = self.env.cr.fetchall() 
@@ -802,11 +773,11 @@ class Model(metaclass=MetaModel):
                     
         return results
 
-    async def search_read(self, domain=None, fields=None, offset=0, limit=None, order=None):
+    async def search_read(self, domain=None, fields=None, offset=0, limit=None, order=None, cursor=None):
         """
         Combines search and read.
         """
-        records = await self.search(domain or [], offset=offset, limit=limit, order=order)
+        records = await self.search(domain or [], offset=offset, limit=limit, order=order, cursor=cursor)
         if not records: return []
         return await records.read(fields)
 

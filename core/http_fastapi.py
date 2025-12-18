@@ -44,23 +44,18 @@ def load_modules():
     addons_path = os.path.join(os.getcwd(), 'addons')
     if os.path.exists(addons_path) and os.path.isdir(addons_path):
         sys.path.append(addons_path)
-        for item in os.listdir(addons_path):
-            if item.startswith('.'): continue
-            mod_path = os.path.join(addons_path, item)
-            if os.path.isdir(mod_path):
-                # Try import
-                try:
-                    # We assume addons.module_name structure if using namespaces
-                    # OR just adding addons to sys.path allows 'import module_name'
-                    # But better: import addons.module_name
-                    import importlib
-                    importlib.import_module(f"addons.{item}")
-                    # Also try to import models/controllers submodules if they exist implicitly?
-                    # Odoo logic is __init__.py imports them.
-                    # We assume __init__.py handles it.
-                    print(f"Loaded addon: {item}")
-                except Exception as e:
-                    print(f"Failed to load addon {item}: {e}")
+        
+        from core.module_graph import load_modules_topological
+        ordered_addons = load_modules_topological(addons_path)
+        print(f"Loading Addons in Order: {ordered_addons}")
+        
+        for item in ordered_addons:
+            try:
+                import importlib
+                importlib.import_module(f"addons.{item}")
+                print(f"Loaded addon: {item}")
+            except Exception as e:
+                print(f"Failed to load addon {item}: {e}")
 
 load_modules()
 

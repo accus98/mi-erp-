@@ -86,9 +86,9 @@ def get_pydantic_model(env_model, mode='read'):
     
     if mode == 'write':
         return SchemaFactory.get_write_schema(env, model_name)
+    elif mode == 'create':
+        return SchemaFactory.get_create_schema(env, model_name)
     else:
-        # Default to Create schema (more strict) or custom read schema?
-        # For now, return Write schema as it is looser (all optional).
         return SchemaFactory.get_write_schema(env, model_name)
 
 class GenericResponse(BaseModel):
