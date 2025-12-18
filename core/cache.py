@@ -93,5 +93,35 @@ class RedisCache:
         except Exception as e:
              print(f"Cache Error (delete): {e}")
 
+    def invalidate_model(self, model, ids=None):
+        """
+        Invalidate L1 cache for specific records.
+        Called by Bus Listener when other workers modify data.
+        """
+        if not self.initialized: self.initialize() # Should be initialized by then
+        
+        # Naive Invalidation: Iterate keys?
+        # Keys are (model, id, field).
+        # We need efficient invalidation.
+        # Store keys by model/id index?
+        # Or just iterate memory_store (fast enough for typical cache size).
+        
+        try:
+            keys_to_del = []
+            for key in self.memory_store:
+                if isinstance(key, tuple) and len(key) >= 2:
+                    k_model, k_id = key[0], key[1]
+                    if k_model == model:
+                        if ids is None or k_id in ids:
+                            keys_to_del.append(key)
+            
+            for k in keys_to_del:
+                del self.memory_store[k]
+                
+            if keys_to_del:
+                print(f"Cache: Invalidated {len(keys_to_del)} keys for {model}")
+        except Exception as e:
+            print(f"Cache Error (invalidate): {e}")
+
 # Global Instance
 Cache = RedisCache()

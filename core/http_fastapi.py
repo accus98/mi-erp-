@@ -124,6 +124,10 @@ async def pg_listener():
                     # print(f"PG Notify: {payload}")
                     try:
                         data = json.loads(payload)
+                        # 1. Invalidar Caché L1 (Critico para Scale)
+                        Cache.invalidate_model(data.get('model'), data.get('ids'))
+                        
+                        # 2. Broadcast a WebSockets
                         asyncio.create_task(bus.broadcast(data))
                     except Exception as e:
                         print(f"PG Notify Error: {e}")
@@ -282,6 +286,11 @@ for path, info in ROUTES.items():
                 # If we raise exception -> Rollback.
                 async with AsyncDatabase.acquire() as cr:
                     uid = session.uid
+                    
+                    # RLS Context
+                    if uid:
+                        await cr.execute(f"SET LOCAL app.current_uid = '{uid}'")
+                    
                     env = Environment(cr, uid=uid, context=session.context)
                     
                     # Async Prefetch to support Sync Properties (env.user, env.company) in Controllers
