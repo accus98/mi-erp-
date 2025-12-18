@@ -332,11 +332,11 @@ class Model(metaclass=MetaModel):
         await cr.execute(query, sql.get_params())
         if cr.fetchone():
             self.env.permission_cache[cache_key] = True
-            AccessCache.set(global_key, True)
+            await AccessCache.set(global_key, True)
             return True
             
         # Cache Negative Result too
-        AccessCache.set(global_key, False)
+        await AccessCache.set(global_key, False)
         raise Exception(f"Access Denied: You cannot {operation} document {self._name}")
 
     def name_get(self):
@@ -464,6 +464,7 @@ class Model(metaclass=MetaModel):
         if not order: return None
         
         safe_parts = []
+        parts = order.split(',')
         
         for part in parts:
             part = part.strip()

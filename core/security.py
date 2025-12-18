@@ -8,26 +8,36 @@ class AccessCache:
     Shared across the process (Global state).
     """
     _cache = {} 
-    
+    _lock = None
+
+    @classmethod
+    def _get_lock(cls):
+        import asyncio
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+        return cls._lock
+
     @classmethod
     def get(cls, key: Tuple) -> Optional[bool]:
+        # Read can be sync for speed (unlocked read is reasonably safe for dicts)
+        # We accept a tiny race where get fails if cleared mid-operation.
         return cls._cache.get(key)
         
     @classmethod
-    def set(cls, key: Tuple, value: bool):
-        # Prevention of unlimited growth
-        # Simple mechanism: If too big, clear half or all.
-        # Given ACL keys are finite permutations of (groups, model, op), 
-        # it shouldn't grow indefinitely unless groups are dynamic.
-        if len(cls._cache) > 50000:
-            cls._cache.clear()
-            
-        cls._cache[key] = value
+    async def set(cls, key: Tuple, value: bool):
+        # Write needs lock for eviction logic concurrency
+        lock = cls._get_lock()
+        async with lock:
+            if len(cls._cache) > 50000:
+                cls._cache.clear()
+            cls._cache[key] = value
         
     @classmethod
-    def invalidate(cls):
+    async def invalidate(cls):
         """
         Clears the entire cache. 
         Should be called when ir.model.access is modified.
         """
-        cls._cache.clear()
+        lock = cls._get_lock()
+        async with lock:
+            cls._cache.clear()

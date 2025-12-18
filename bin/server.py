@@ -6,6 +6,11 @@ import uvicorn
 sys.path.append(os.getcwd())
 
 if __name__ == "__main__":
+    import os
+    if not os.getenv('ENV_TYPE'):
+        os.environ['ENV_TYPE'] = 'dev'
+        print("NOTICE: ENV_TYPE not set. Defaulting to 'dev' for local execution.")
+        
     print("Starting Nexo Enterprise Server...")
     # Run Uvicorn logic
     # We reference the module string "core.http_fastapi:app"

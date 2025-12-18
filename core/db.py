@@ -28,9 +28,38 @@ class Database:
         if _pool is None:
             host = os.getenv('DB_HOST', 'localhost')
             user = os.getenv('DB_USER', 'postgres')
-            password = os.getenv('DB_PASSWORD', '1234')
+            password = os.getenv('DB_PASSWORD')
             dbname = os.getenv('DB_NAME', 'nexo')
             port = os.getenv('DB_PORT', '5432')
+            
+            env_type = os.getenv('ENV_TYPE', 'prod')
+            
+            # Smart Dev Detection & .env Loader
+            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if not os.getenv('ENV_TYPE') and os.path.exists(os.path.join(root_dir, '.git')):
+                 env_type = 'dev'
+            
+            env_file = os.path.join(root_dir, '.env')
+            if os.path.exists(env_file):
+                try:
+                    with open(env_file, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith('#') and '=' in line:
+                                k, v = line.split('=', 1)
+                                if k == 'ENV_TYPE' and not os.getenv('ENV_TYPE'):
+                                    env_type = v
+                                if k == 'DB_PASSWORD' and not password:
+                                    password = v
+                except:
+                    pass
+            
+            if not password:
+                if env_type == 'dev':
+                    print("DB Warning: Using default password '1234' for Dev.")
+                    password = '1234'
+                else:
+                    raise ValueError("CRITICAL: DB_PASSWORD environment variable is not set!")
             
             try:
                 # ThreadedConnectionPool ensures thread-safety.

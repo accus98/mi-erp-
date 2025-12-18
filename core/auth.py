@@ -9,11 +9,42 @@ import os
 # Fallback to pbkdf2_sha256 due to bcrypt/passlib compatibility issues
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
-# SECURITY: Externalize Keys
-# Warning: Default key is for dev only.
-SECRET_KEY = os.getenv('SECRET_KEY', "SECRET_CHANGE_ME")
-if SECRET_KEY == "SECRET_CHANGE_ME":
-    print("WARNING: Using insecure default SECRET_KEY. Set 'SECRET_KEY' in environment.")
+SECRET_KEY = os.getenv('SECRET_KEY')
+ENV_TYPE = os.getenv('ENV_TYPE', 'prod')
+
+# Smart Dev Detection
+# Smart Dev Detection & .env Loader
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+git_dir = os.path.join(root_dir, '.git')
+env_file = os.path.join(root_dir, '.env')
+
+# 1. Try Git Detection
+if not os.getenv('ENV_TYPE') and os.path.exists(git_dir):
+    ENV_TYPE = 'dev'
+
+# 2. Try .env File (Manual Load)
+if os.path.exists(env_file):
+    try:
+        with open(env_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    if k == 'ENV_TYPE' and not os.getenv('ENV_TYPE'):
+                        ENV_TYPE = v
+                    if k == 'SECRET_KEY' and not SECRET_KEY:
+                        SECRET_KEY = v
+    except Exception:
+        pass
+
+if not SECRET_KEY:
+    if ENV_TYPE == 'dev':
+        SECRET_KEY = "SECRET_CHANGE_ME"
+        print("WARNING: Using insecure default SECRET_KEY (Dev Mode).")
+    else:
+        raise ValueError("CRITICAL: SECRET_KEY environment variable is not set!")
+elif SECRET_KEY == "SECRET_CHANGE_ME" and ENV_TYPE != 'dev':
+     raise ValueError("CRITICAL: You are using the default insecure SECRET_KEY in Production!")
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30

@@ -3,7 +3,7 @@ echo Starting Nexo ERP...
 
 :: Start Backend (Server)
 echo Launching Backend...
-start "Nexo Server (Python)" cmd /k "python bin/server.py"
+start "Nexo Server (Python)" cmd /k "set ENV_TYPE=dev && python bin/server.py"
 
 :: Wait for Server to wake up
 timeout /t 2 /nobreak >nul

@@ -55,7 +55,8 @@ def load_modules():
                 importlib.import_module(f"addons.{item}")
                 print(f"Loaded addon: {item}")
             except Exception as e:
-                print(f"Failed to load addon {item}: {e}")
+                print(f"CRITICAL: Failed to load addon {item}: {e}")
+                raise e
 
 load_modules()
 
@@ -193,7 +194,7 @@ for path, info in ROUTES.items():
             # 1. CSRF Protection (Audit Remediation)
             if request.method in ("POST", "PUT", "DELETE", "PATCH"):
                 # Exempt login and destroy (if session token is missing context)
-                if request.url.path in ["/web/login", "/web/session/destroy"]:
+                if request.url.path in ["/web/login", "/web/session/destroy", "/web/session/check"]:
                     pass
                 else:
                     csrf_header = request.headers.get("X-CSRF-Token")
@@ -214,7 +215,8 @@ for path, info in ROUTES.items():
                     
                     # RLS Context
                     if uid:
-                        await cr.execute(f"SET LOCAL app.current_uid = '{uid}'")
+                        # Use set_config for safe parameterization (SET syntax doesn't support $1)
+                        await cr.execute("SELECT set_config('app.current_uid', $1::text, true)", (str(uid),))
                     
                     env = Environment(cr, uid=uid, context=session.context)
                     
@@ -268,7 +270,10 @@ for path, info in ROUTES.items():
                 print(f"Error: {e}")
                 import traceback
                 traceback.print_exc()
-                return JSONResponse(status_code=500, content={"error": str(e)})
+                # Security: Hide details in Production
+                env_type = os.getenv('ENV_TYPE', 'prod')
+                error_msg = str(e) if env_type == 'dev' else "Internal Server Error"
+                return JSONResponse(status_code=500, content={"error": error_msg})
         return handler
 
     # Register with supporting methods (GET/POST)
