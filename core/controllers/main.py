@@ -24,10 +24,10 @@ async def login(req, env):
     uid = await UsersSudo._check_credentials(login, password)
     
     if uid:
-        req.session.rotate() # Prevent Fixation
+        await req.session.rotate() # Prevent Fixation
         req.session.uid = uid
         req.session.login = login
-        req.session.save() # Persist
+        await req.session.save() # Persist
         return Response({'result': {'uid': uid, 'session_id': req.session.sid, 'csrf_token': req.session.csrf_token}})
     else:
         return Response({'error': 'Access Denied'}, status=401)
@@ -155,13 +155,13 @@ async def call_kw(req, env):
         })
 
 
-@route('/web/session/destroy', auth='user')
+@route('/web/session/destroy', auth='public')
 async def destroy(req, env):
     req.session.uid = None
-    req.session.save()
+    await req.session.save()
     return Response({'result': True})
 
-@route('/web/session/check', auth='user')
+@route('/web/session/check', auth='public')
 async def check(req, env):
     return Response({'result': {'uid': req.session.uid, 'login': req.session.login, 'csrf_token': req.session.csrf_token}})
 

@@ -12,39 +12,30 @@ pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 SECRET_KEY = os.getenv('SECRET_KEY')
 ENV_TYPE = os.getenv('ENV_TYPE', 'prod')
 
-# Smart Dev Detection
-# Smart Dev Detection & .env Loader
-root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-git_dir = os.path.join(root_dir, '.git')
-env_file = os.path.join(root_dir, '.env')
+# Auto-loading .env is handled by entry points (http_fastapi.py, scripts)
+# or via python-dotenv if strictly needed here.
+from dotenv import load_dotenv
+load_dotenv()
 
-# 1. Try Git Detection REMOVED for Security
-# We rely ONLY on explicit .env file or Environment Variables.
-# if not os.getenv('ENV_TYPE') and os.path.exists(git_dir):
-#     ENV_TYPE = 'dev'
+# Reload vars after dotenv (in case they were None before)
+if not SECRET_KEY: SECRET_KEY = os.getenv('SECRET_KEY')
+if not os.getenv('ENV_TYPE'): ENV_TYPE = os.getenv('ENV_TYPE', 'prod')
 
-# 2. Try .env File (Manual Load)
-if os.path.exists(env_file):
-    try:
-        with open(env_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    k, v = line.split('=', 1)
-                    if k == 'ENV_TYPE' and not os.getenv('ENV_TYPE'):
-                        ENV_TYPE = v
-                    if k == 'SECRET_KEY' and not SECRET_KEY:
-                        SECRET_KEY = v
-    except Exception:
-        pass
+# 1. Manual Parsing Logic REMOVED (Duplicate)
+pass
 
 if not SECRET_KEY:
-    if ENV_TYPE == 'dev':
-        SECRET_KEY = "SECRET_CHANGE_ME"
-        print("WARNING: Using insecure default SECRET_KEY (Dev Mode).")
-    else:
-        raise ValueError("CRITICAL: SECRET_KEY environment variable is not set!")
-elif SECRET_KEY == "SECRET_CHANGE_ME" and ENV_TYPE != 'dev':
+    # STRICT MODE: No defaults. App must crash if no secret.
+    # Security First. Use .env to set SECRET_KEY even for Dev.
+    msg = (
+        "CRITICAL SECURITY ERROR: 'SECRET_KEY' is not set.\n"
+        "1. Check your .env file.\n"
+        "2. Check Environment Variables.\n"
+        "Application cannot start without a secure secret."
+    )
+    raise ValueError(msg)
+
+if SECRET_KEY == "SECRET_CHANGE_ME" and ENV_TYPE != 'dev':
      raise ValueError("CRITICAL: You are using the default insecure SECRET_KEY in Production!")
 
 ALGORITHM = "HS256"

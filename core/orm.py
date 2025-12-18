@@ -258,6 +258,9 @@ class Model(metaclass=MetaModel):
         operation: 'read', 'write', 'create', 'unlink'
         """
         if self.env.uid == 1: 
+            # Security Audit: Log superuser bypass
+            if operation in ('write', 'unlink'):
+                print(f"AUDIT WARN: UID 1 bypassing rules for {operation} on {self._name}")
             return True
         
         # Cache Check
@@ -300,7 +303,7 @@ class Model(metaclass=MetaModel):
         groups_key = tuple(sorted(safe_groups)) if safe_groups else ()
         global_key = (groups_key, self._name, operation)
         
-        cached_result = AccessCache.get(global_key)
+        cached_result = await AccessCache.get(global_key)
         if cached_result is not None:
              self.env.permission_cache[cache_key] = cached_result
              if cached_result:

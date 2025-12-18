@@ -17,3 +17,5 @@ jinja2
 alembic
 sqlalchemy
 psycopg2-binary
+asteval
+python-dotenv

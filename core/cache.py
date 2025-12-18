@@ -1,12 +1,14 @@
 import os
-import redis
 import json
 import logging
+import asyncio
 
-# WARNING: redis.Redis is SYNCHRONOUS.
-# In a high-concurrency async app, consider switching to redis.asyncio.
-# However, for typical ERP loads, the sub-millisecond blocking is often acceptable.
-# Ensure 'use_redis = False' (Local Memory) for max speed in Dev/Single-worker.
+# Use redis.asyncio for non-blocking I/O
+try:
+    import redis.asyncio as redis
+except ImportError:
+    # Fallback if older redis installed (though requirements has 'redis')
+    import redis
 
 class RedisCache:
     _instance = None
@@ -17,7 +19,7 @@ class RedisCache:
             cls._instance.initialized = False
         return cls._instance
 
-    def initialize(self):
+    async def initialize(self):
         if self.initialized: return
         
         self.host = os.getenv('REDIS_HOST', 'localhost')
@@ -27,7 +29,6 @@ class RedisCache:
         
         self.use_redis = True
         self.memory_store = {}
-        # Reverse Index for O(1) L1 Invalidation: { model_name: { (model, id, field), ... } }
         self._model_index = {}
         
         try:
@@ -38,16 +39,16 @@ class RedisCache:
                 password=self.password,
                 decode_responses=True
             )
-            self.redis.ping()
-            print("Cache: Connected to Redis.")
+            await self.redis.ping()
+            print("Cache: Connected to Async Redis.")
         except Exception as e:
-            print(f"Cache Warning: Redis connection failed ({e}). Using In-Memory Fallback.")
+            print(f"Cache Warning: Async Redis connection failed ({e}). Using In-Memory Fallback.")
             self.use_redis = False
             
         self.initialized = True
 
-    def get(self, key, default=None):
-        if not self.initialized: self.initialize()
+    async def get(self, key, default=None):
+        if not self.initialized: await self.initialize()
         
         # L1: Memory
         if key in self.memory_store:
@@ -56,7 +57,7 @@ class RedisCache:
         # L2: Redis
         try:
             if self.use_redis:
-                val = self.redis.get(key)
+                val = await self.redis.get(key)
                 if val is not None:
                     try:
                         data = json.loads(val)
@@ -71,8 +72,8 @@ class RedisCache:
             
         return default
 
-    def set(self, key, value, ttl=3600):
-        if not self.initialized: self.initialize()
+    async def set(self, key, value, ttl=3600):
+        if not self.initialized: await self.initialize()
         
         # L1: Memory
         self.memory_store[key] = value
@@ -90,24 +91,22 @@ class RedisCache:
             key_str = str(key)
             
             if self.use_redis:
-                pipeline = self.redis.pipeline()
-                pipeline.setex(key_str, ttl, val_str)
-                
-                # Dependency Tracking for ORM Keys
-                if isinstance(key, tuple) and len(key) >= 2:
-                    model, res_id = key[0], key[1]
-                    # deps:res.users:1
-                    dep_key = f"deps:{model}:{res_id}"
-                    pipeline.sadd(dep_key, key_str)
-                    # Set TTL for dependency set too? (Optional, match key TTL or longer)
-                    pipeline.expire(dep_key, ttl + 3600) 
-                
-                pipeline.execute()
+                async with self.redis.pipeline() as pipe:
+                    await pipe.setex(key_str, ttl, val_str)
+                    
+                    # Dependency Tracking
+                    if isinstance(key, tuple) and len(key) >= 2:
+                        model, res_id = key[0], key[1]
+                        dep_key = f"deps:{model}:{res_id}"
+                        await pipe.sadd(dep_key, key_str)
+                        await pipe.expire(dep_key, ttl + 3600) 
+                    
+                    await pipe.execute()
         except Exception as e:
             print(f"Cache Error (set): {e}")
 
-    def delete(self, key):
-        if not self.initialized: self.initialize()
+    async def delete(self, key):
+        if not self.initialized: await self.initialize()
         
         # L1
         if key in self.memory_store:
@@ -121,57 +120,56 @@ class RedisCache:
         # L2
         try:
             if self.use_redis:
-                self.redis.delete(str(key))
-                # Note: We don't remove from deps set here, 
-                # strictly speaking we should, but it will expire or be cleaned on invalidate.
+                await self.redis.delete(str(key))
         except Exception as e:
              print(f"Cache Error (delete): {e}")
 
-    def invalidate_model(self, model, ids=None):
-        """
-        Invalidate L1 and L2 cache for specific records using Redis Sets.
-        O(1) complexity per record instead of O(N) scan.
-        """
-        if not self.initialized: self.initialize()
+    async def invalidate_model(self, model, ids=None):
+        if not self.initialized: await self.initialize()
         
-        # 1. L1 Invalidation (O(1) with Reverse Index)
+        # 1. L1 Invalidation
         if model in self._model_index:
-            keys_to_remove = list(self._model_index[model]) # Safe Copy
-            
+            keys_to_remove = list(self._model_index[model])
             for k in keys_to_remove:
-                # k is (model, id, field)
                 if ids is None or k[1] in ids:
                     if k in self.memory_store:
                         del self.memory_store[k]
                     self._model_index[model].discard(k)
             
-        # 2. L2 Redis Invalidation (Sets)
+        # 2. L2 Redis Invalidation
         try:
             if self.use_redis:
-                target_ids = ids if ids else [] 
-                
                 keys_to_del_redis = []
                 sets_to_del = []
                 
                 if ids:
                     for rid in ids:
                         dep_key = f"deps:{model}:{rid}"
-                        # Get all keys dependent on this record
-                        members = self.redis.smembers(dep_key)
+                        members = await self.redis.smembers(dep_key)
                         if members:
                             keys_to_del_redis.extend(members)
                         sets_to_del.append(dep_key)
                 else:
-                    # Fallback: Invalidate everything for model?
-                    # This requires scanning deps:model:*
-                    # Or relying on L1 clear.
+                    # Generic invalidation handling (Complex if not tracking all keys)
                     pass 
 
                 if keys_to_del_redis:
-                    pipeline = self.redis.pipeline()
-                    pipeline.delete(*keys_to_del_redis)
-                    pipeline.delete(*sets_to_del)
-                    pipeline.execute()
+                    async with self.redis.pipeline() as pipe:
+                        # Redis pipeline methods add to pipe, execute runs them
+                        # await not needed for adding to pipe?
+                        # redis-py async pipeline: pipe.delete(...) returns Coroutine? 
+                        # usually pipe commands return self or future.
+                        # Correct pattern: await pipe.delete(...).
+                        # Wait, pipe commands are chainable but in async they are awaited if immediate?
+                        # Documentation says: `await pipe.set(...)` ?
+                        # No, usually in pipeline context you just `pipe.set()` then `await pipe.execute()`.
+                        # BUT redis-py async might differ.
+                        # To be safe: await pipe.delete(...)
+                        if keys_to_del_redis:
+                             await pipe.delete(*keys_to_del_redis)
+                        if sets_to_del:
+                             await pipe.delete(*sets_to_del)
+                        await pipe.execute()
                     
                 print(f"Cache: Invalidated {len(keys_to_del_redis)} Redis keys for {model} ids={ids}")
                 

@@ -37,24 +37,15 @@ class Database:
             
             env_type = os.getenv('ENV_TYPE', 'prod')
             
-            # Smart Dev Detection & .env Loader
-            # Git Detection REMOVED.
+            # Load keys via dotenv
+            from dotenv import load_dotenv
+            load_dotenv()
             
-            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            env_file = os.path.join(root_dir, '.env')
-            if os.path.exists(env_file):
-                try:
-                    with open(env_file, 'r') as f:
-                        for line in f:
-                            line = line.strip()
-                            if line and not line.startswith('#') and '=' in line:
-                                k, v = line.split('=', 1)
-                                if k == 'ENV_TYPE' and not os.getenv('ENV_TYPE'):
-                                    env_type = v
-                                if k == 'DB_PASSWORD' and not password:
-                                    password = v
-                except:
-                    pass
+            # Re-fetch explicitly to ensure env is fresh
+            if not password: password = os.getenv('DB_PASSWORD', '1234')
+            if not env_type: env_type = os.getenv('ENV_TYPE', 'prod')
+
+            pass
             
             if not password:
                 if env_type == 'dev':

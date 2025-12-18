@@ -16,7 +16,7 @@ class TaskQueue:
         Push task to Redis List.
         task_name: 'model.name.method'
         """
-        if not Cache.initialized: Cache.initialize()
+        if not Cache.initialized: await Cache.initialize()
         
         payload = {
             'task': task_name,
@@ -26,10 +26,10 @@ class TaskQueue:
         data = json.dumps(payload)
         
         if Cache.use_redis:
-            # Sync redis client call
+            # Async redis client call
             try:
-                # Use to_thread to avoid blocking loop on network I/O even if fast
-                await asyncio.to_thread(Cache.redis.lpush, cls.QUEUE_KEY, data)
+                # Direct await on async client
+                await Cache.redis.lpush(cls.QUEUE_KEY, data)
                 print(f"Task Enqueued: {task_name}")
             except Exception as e:
                 print(f"Enqueue Error: {e}")
@@ -44,7 +44,7 @@ class TaskQueue:
         Async Worker Loop.
         """
         print("Queue Worker Started...")
-        if not Cache.initialized: Cache.initialize()
+        if not Cache.initialized: await Cache.initialize()
         
         if not Cache.use_redis:
             print("Queue Worker: Redis not available. Worker stopping.")
@@ -52,9 +52,9 @@ class TaskQueue:
 
         while True:
             try:
-                # BRPOP is blocking. Must run in thread.
+                # BRPOP is awaitable in redis.asyncio
                 # Timeout 5 seconds
-                msg = await asyncio.to_thread(Cache.redis.brpop, cls.QUEUE_KEY, 5)
+                msg = await Cache.redis.brpop(cls.QUEUE_KEY, 5)
                 
                 if msg:
                     # msg is (key, value)

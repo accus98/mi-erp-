@@ -1,5 +1,7 @@
 import os
 import mimetypes
+from dotenv import load_dotenv
+load_dotenv()
 from fastapi import FastAPI, Request, Response, APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -126,7 +128,7 @@ async def pg_listener():
                     try:
                         data = json.loads(payload)
                         # 1. Invalidar Caché L1 (Critico para Scale)
-                        Cache.invalidate_model(data.get('model'), data.get('ids'))
+                        asyncio.create_task(Cache.invalidate_model(data.get('model'), data.get('ids')))
                         
                         # 2. Broadcast a WebSockets
                         asyncio.create_task(bus.broadcast(data))
