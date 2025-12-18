@@ -43,45 +43,53 @@ class RedisCache:
     def get(self, key, default=None):
         if not self.initialized: self.initialize()
         
+        # L1: Memory
+        if key in self.memory_store:
+            return self.memory_store[key]
+
+        # L2: Redis
         try:
             if self.use_redis:
                 val = self.redis.get(key)
                 if val is not None:
                     try:
-                        return json.loads(val)
+                        data = json.loads(val)
                     except:
-                        return val
-            else:
-                return self.memory_store.get(key, default)
+                        data = val
+                    
+                    # Populate L1
+                    self.memory_store[key] = data
+                    return data
         except Exception as e:
             print(f"Cache Error (get): {e}")
-            return default
             
         return default
 
     def set(self, key, value, ttl=3600):
         if not self.initialized: self.initialize()
         
+        # L1: Memory
+        self.memory_store[key] = value
+        
+        # L2: Redis
         try:
             val_str = json.dumps(value)
             if self.use_redis:
                 self.redis.setex(key, ttl, val_str)
-            else:
-                self.memory_store[key] = value
-                # Need to implement TTL cleanup for memory store? 
-                # For basic session dev usage, strict TTL cleanup in memory isn't critical.
         except Exception as e:
             print(f"Cache Error (set): {e}")
 
     def delete(self, key):
         if not self.initialized: self.initialize()
         
+        # L1
+        if key in self.memory_store:
+            del self.memory_store[key]
+            
+        # L2
         try:
             if self.use_redis:
                 self.redis.delete(key)
-            else:
-                if key in self.memory_store:
-                    del self.memory_store[key]
         except Exception as e:
              print(f"Cache Error (delete): {e}")
 

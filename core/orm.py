@@ -106,9 +106,19 @@ class Model(metaclass=MetaModel):
     
     def __bool__(self):
         return bool(self.ids)
-    
+        
+    def __await__(self):
+        """
+        Make RecordSet awaitable.
+        Allows 'await record.partner_id' to work even if result is cached.
+        returns self.
+        """
+        async def _self():
+            return self
+        return _self().__await__()
+        
     def __repr__(self):
-        return f"{self._name}({self.ids})"
+        return f"<{self._name}({self.ids})>"
     
     def __eq__(self, other):
         if not isinstance(other, Model): return False
@@ -1024,23 +1034,61 @@ class Model(metaclass=MetaModel):
                  
         records = self.browse(created_ids)
         
-        # 5. Process Relations (Looping but necessary for specific logic)
-        # Note: If we really want batch here, we need write() to support batch.
-        # But write() usually takes 1 set of values for ids.
-        # For Creation, each record might have different relations.
-        # So we loop.
+        # 5. Process Relations (Batch Optimization)
+        # Collect operations
+        m2m_batch = {} # field -> [(rid, val)]
+        o2m_batch = {} # field -> [(rid, val)]
+        binary_batch = [] # (record, val)
         
         for idx, r_data in enumerate(relation_data):
-            record = records[idx]
-            m2m = r_data['m2m']
-            o2m = r_data['o2m']
-            binary = r_data['binary']
+            rid = created_ids[idx]
+            for f, v in r_data['m2m'].items():
+                if f not in m2m_batch: m2m_batch[f] = []
+                m2m_batch[f].append((rid, v))
             
-            if m2m: await record.write(m2m)
-            if binary: await self._write_binary(record, binary)
-            if o2m:
-                for k, v in o2m.items():
-                     await self._process_one2many(record, k, v)
+            for f, v in r_data['o2m'].items():
+                if f not in o2m_batch: o2m_batch[f] = []
+                o2m_batch[f].append((rid, v))
+                
+            if r_data['binary']:
+                binary_batch.append((records[idx], r_data['binary']))
+
+        # Execute M2M (Bulk Insert)
+        for field_name, ops in m2m_batch.items():
+            f_obj = self._fields[field_name]
+            to_insert = []
+            
+            for rid, val in ops:
+                # Handle Odoo Commands [(6, 0, ids)] or Raw IDs
+                target_ids = val
+                if isinstance(val, list) and val and isinstance(val[0], tuple):
+                    # Simple command parser
+                    for cmd in val:
+                        if cmd[0] == 6: target_ids = cmd[2]
+                
+                # Make iterable
+                if not isinstance(target_ids, (list, tuple)): target_ids = [target_ids]
+                
+                for tid in target_ids:
+                    to_insert.append((rid, tid))
+            
+            if to_insert:
+                await self.env.cr.executemany(f'INSERT INTO "{f_obj.relation}" ("{f_obj.column1}", "{f_obj.column2}") VALUES ($1, $2)', to_insert)
+
+        # Execute O2M (Iterative fallback or Batch Update)
+        # O2M usually involves complex creates or updates. Safer to loop or delegate.
+        # But we can optimize basic "updating keys" if val is list of IDs?
+        # Assuming defaults for now. Use loop for O2M safety/complexity balance.
+        for field_name, ops in o2m_batch.items():
+             for rid, val in ops:
+                 # Re-browse to get record context if needed, or pass ID
+                 # _process_one2many usually needs record
+                 rec = self.browse([rid])
+                 await self._process_one2many(rec, field_name, val)
+
+        # Execute Binary (Loop)
+        for record, val in binary_batch:
+            await self._write_binary(record, val)
         
         # 6. Trigger Compute
         all_keys = set()

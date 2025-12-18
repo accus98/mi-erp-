@@ -123,6 +123,26 @@ class Date(Field[Any]):
 
 DateTime = Datetime
 
+class FieldFuture:
+    """
+    Awaitable Proxy for Lazy Loading.
+    Returned when accessing a Relational Field not in cache.
+    Usage:
+        partner = await record.partner_id
+    """
+    def __init__(self, record, field_name):
+        self._record = record
+        self._field_name = field_name
+        
+    def __await__(self):
+        async def _fetch():
+            await self._record.ensure([self._field_name])
+            return getattr(self._record, self._field_name)
+        return _fetch().__await__()
+        
+    def __repr__(self):
+        return f"<FieldFuture {self._field_name} (Await me)>"
+
 class Many2one(Field['Model']):
     _type = 'many2one'
     _sql_type = 'INTEGER' 
@@ -132,13 +152,20 @@ class Many2one(Field['Model']):
         self.comodel_name = comodel_name
         self.ondelete = ondelete
 
-    def __get__(self, record, owner) -> 'Model':
+    def __get__(self, record, owner) -> Union['Model', FieldFuture]:
         if record is None: return self # type: ignore
-        # Super __get__ calls ensure_one
-        val_id = super().__get__(record, owner)
-        if not val_id:
-             return record.env[self.comodel_name].browse([]) # type: ignore
-        return record.env[self.comodel_name].browse([val_id]) # type: ignore
+        if not record.ids: return record.env[self.comodel_name].browse([]) # type: ignore
+        record.ensure_one()
+        
+        # Check Base Cache for ID
+        key = (record._name, record.ids[0], self.name)
+        if key in record.env.cache:
+            val_id = record.env.cache[key]
+            if not val_id:
+                 return record.env[self.comodel_name].browse([]) # type: ignore
+            return record.env[self.comodel_name].browse([val_id]) # type: ignore
+            
+        return FieldFuture(record, self.name)
 
 class One2many(Field[list['Model']]): # Returns RecordSet (List-like)
     _type = 'one2many'
@@ -150,7 +177,7 @@ class One2many(Field[list['Model']]): # Returns RecordSet (List-like)
         self.inverse_name = inverse_name
         self.store = False
     
-    def __get__(self, record, owner) -> list['Model']:
+    def __get__(self, record, owner) -> Union[list['Model'], FieldFuture]:
         if record is None or not record.ids: return [] # type: ignore
         record.ensure_one()
         
@@ -160,7 +187,7 @@ class One2many(Field[list['Model']]): # Returns RecordSet (List-like)
             ids = record.env.cache[key]
             return record.env[self.comodel_name].browse(ids) # type: ignore
             
-        raise RuntimeError(f"AsyncORM: One2many field '{self.name}' not in cache. Use await record.ensure('{self.name}').")
+        return FieldFuture(record, self.name)
 
 class Many2many(Field[list['Model']]):
     _type = 'many2many'
@@ -174,7 +201,7 @@ class Many2many(Field[list['Model']]):
         self.column2 = column2
         self.store = False
     
-    def __get__(self, record, owner) -> list['Model']:
+    def __get__(self, record, owner) -> Union[list['Model'], FieldFuture]:
         if record is None or not record.ids: return [] # type: ignore
         record.ensure_one()
         
@@ -184,13 +211,13 @@ class Many2many(Field[list['Model']]):
             ids = record.env.cache[key]
             return record.env[self.comodel_name].browse(ids) # type: ignore
             
-        raise RuntimeError(f"AsyncORM: Many2many field '{self.name}' not in cache. Use await record.ensure('{self.name}').")
+        return FieldFuture(record, self.name)
 
 class Binary(Field[bytes]):
     _type = 'binary'
     _sql_type = None # Not stored in main table
 
-    def __get__(self, record, owner) -> Optional[bytes]:
+    def __get__(self, record, owner):
         if record is None: return self # type: ignore
         if not record.ids: return None
 
@@ -200,17 +227,15 @@ class Binary(Field[bytes]):
         if key in record.env.cache:
              return record.env.cache[key]
         
-        # Fetch Attachment
-        atts = record.env['ir.attachment'].search([
-            ('res_model', '=', record._name),
-            ('res_id', '=', record.ids[0]),
-             ('name', '=', self.name)
-        ])
-        val = atts[0].datas if atts else False
-        record.env.cache[key] = val
-        return val
+        # Async Search required
+        return FieldFuture(record, self.name)
 
     def __set__(self, record, value):
         # Trigger ORM write
         if record and record.ids:
-            record.write({self.name: value})
+            # Using pending writes
+            for rid in record.ids:
+                 key = (record._name, rid)
+                 if key not in record.env.pending_writes:
+                     record.env.pending_writes[key] = {}
+                 record.env.pending_writes[key][self.name] = value

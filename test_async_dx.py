@@ -1,83 +1,111 @@
+
+import asyncio
+import os
 from core.db_async import AsyncDatabase
 from core.registry import Registry
 from core.orm import Model
-from core.fields import Char, Many2many
-import asyncio
-import os
-
-# Import Models to Ensure Registration
-import core.models.ir_model
-import core.models.ir_rule
-import core.models.ir_model_data
-import core.auth # Registers res.users and res.groups
-
+from core.fields import Char, Many2one
 from core.env import Environment
 
-async def run_test():
-    print("Test: Async DX Improvements")
-    
-    # 1. Setup
+class DxArtist(Model):
+    _name = 'dx.artist'
+    name = Char()
+
+class DxSong(Model):
+    _name = 'dx.song'
+    title = Char()
+    artist_id = Many2one('dx.artist', string='Artist')
+
+Registry.register('dx.artist', DxArtist)
+Registry.register('dx.song', DxSong)
+
+async def test_dx():
+    print("Initializing DB...")
     await AsyncDatabase.initialize()
     
-    # Create Environment
     async with AsyncDatabase.acquire() as cr:
-        env = Environment(cr, 1, {})
-        Rule = env['ir.rule']
-        Model = env['ir.model']
+        # Tables
+        await DxArtist._auto_init(cr)
+        await DxSong._auto_init(cr)
         
-        # 1. Get a Model ID
-        models = await Model.search([('model', '=', 'ir.rule')])
-        if not models:
-             print("SKIP: ir.rule model not found in ir.model (Bootstrap needed?)")
-             return
-        rule_model_id = models[0].id
+        env = Environment(cr, uid=1, context={})
         
-        # 2. Create Data
-        # Ensure we pass list of dicts or single dict.
-        # create returns recordset
-        rules = await Rule.create({'name': 'Test Rule DX', 'model_id': rule_model_id})
-        r1 = rules[0] # Ensure one
+        # Create Data
+        artist = await env['dx.artist'].create({'name': 'Daft Punk'})
+        song = await env['dx.song'].create({
+            'title': 'Get Lucky',
+            'artist_id': artist.id
+        })
         
-        print(f"Created Rule ID: {r1.id}")
+        print("Test 1: Await RecordSet (Cached)")
+        # 'artist' is fully cached because create returns it.
+        # Check explicit await call
+        res = await artist
+        print(f"Await result: {res}")
+        if res == artist:
+            print("PASS: Awaiting RecordSet works.")
+        else:
+            print("FAIL: Awaiting RecordSet returned something else.")
+
+        print("Test 2: Lazy Load Relation (Uncached)")
+        # Clear cache to simulate fresh read
+        env.cache.clear()
         
-        # 3. Test Uncached Field Access
-        env.cache = {} 
-        r_check = Rule.browse([r1.id])
+        # Get fresh record (only ID known if we used search, but here we construct)
+        # Let's search to simulate cold start
+        song_rec = (await env['dx.song'].search([('id', '=', song.id)]))[0]
         
-        try:
-            val = r_check.name
-            print("FAIL: Uncached field access should raise error.")
-        except RuntimeError as e:
-            print(f"PASS: Caught expected error: {e}")
-            if "await record.ensure('name')" in str(e):
-                 print("PASS: Error message contains helpful hint.")
-            else:
-                 print("FAIL: Error message missing hint.")
-    
-        # 4. Test Usage of Ensure
-        print("Testing ensure()...")
-        await r_check.ensure('name')
-        val = r_check.name
-        print(f"PASS: Access after ensure: {val}")
+        # Access song_rec.artist_id
+        # It is NOT in cache (search only fetches ID by default usually, unless eager logic changed)
+        # Wait, search returns RecordSet. Accessing fields triggers __get__.
+        # artist_id is uncached. 
+        # Should return FieldFuture.
         
-        # 5. Test Uncached M2M Access (groups)
-        env.cache = {}
-        try:
-            val = r_check.groups
-            print("FAIL: Uncached M2M access should raise error.")
-        except RuntimeError as e:
-            print(f"PASS: Caught expected M2M error: {e}")
-            if "await record.ensure('groups')" in str(e):
-                 print("PASS: M2M Error message contains helpful hint.")
-    
-        # 6. Test Ensure M2M
-        print("Testing M2M ensure()...")
-        await r_check.ensure('groups')
-        groups = r_check.groups
-        print(f"PASS: M2M Access after ensure: {groups} (Len: {len(groups)})")
+        future = song_rec.artist_id
+        print(f"Access returned: {future}")
         
-        # Cleanup
-        await r1.unlink()
+        if 'FieldFuture' in str(future):
+            print("PASS: FieldFuture returned.")
+        else:
+            print("FAIL: FieldFuture not returned (maybe cached?).")
+            
+        # Await it
+        artist_rel = await song_rec.artist_id
+        print(f"Resolved: {artist_rel}")
+        
+        # Verify it is the artist
+        # Accessing name requires another await if not fetched?
+        # Typically 'ensure' fetches default fields? ORM default is primitive fields.
+        # But 'artist_id' points to a record. Does browsing fetch data? No.
+        # So 'artist_rel' is a RecordSet with ID. 
+        # Its 'name' is NOT cached unless we read it.
+        
+        # Test chaining? 'await record.partner_id' gives RecordSet.
+        # 'await (await record.partner_id).name' ?
+        # 'name' is Char. If not cached, it raises RuntimeError currently (as per plan).
+        # So we must ensure name.
+        
+        await artist_rel.read(['name'])
+        print(f"Artist Name: {artist_rel.name}")
+        
+        if artist_rel.name == 'Daft Punk':
+            print("PASS: Lazy Loading Successful.")
+        else:
+             print("FAIL: Wrong data.")
+
+        print("Test 3: Await Cached Relation")
+        # Now artist_id is in cache (val_id).
+        # __get__ should return RecordSet.
+        # await RecordSet should work.
+        
+        cached_rel = await song_rec.artist_id
+        print(f"Cached Await: {cached_rel}")
+        if cached_rel.id == artist.id:
+             print("PASS: Awaiting Cached Relation works.")
+        else:
+             print("FAIL: Cached Relation broken.")
+
+    await AsyncDatabase.close()
 
 if __name__ == "__main__":
-    asyncio.run(run_test())
+    asyncio.run(test_dx())
