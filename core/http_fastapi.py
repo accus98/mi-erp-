@@ -192,8 +192,8 @@ for path, info in ROUTES.items():
         async def handler(request: Request, response: Response, session: Session = Depends(get_session)):
             # 1. CSRF Protection (Audit Remediation)
             if request.method in ("POST", "PUT", "DELETE", "PATCH"):
-                # Exempt login
-                if request.url.path == "/web/login":
+                # Exempt login and destroy (if session token is missing context)
+                if request.url.path in ["/web/login", "/web/session/destroy"]:
                     pass
                 else:
                     csrf_header = request.headers.get("X-CSRF-Token")

@@ -48,23 +48,17 @@ class ResUsers(Model):
         Verifies login/password. Returns user_id or None.
         Supports automatic migration from plaintext to hash.
         """
-        print(f"DEBUG AUTH: Checking {login}...")
         users = await self.search([('login', '=', login)])
         if not users:
-            print("DEBUG AUTH: User not found via search.")
             return None
         
-        print(f"DEBUG AUTH: Found users {users.ids}")
         # Async Read required
         data = await users.read(['password'])
-        if not data: 
-            print("DEBUG AUTH: Read returned no data.")
-            return None
+        if not data: return None
         
         user_data = data[0]
         stored_password = user_data['password']
         user_id = user_data['id']
-        print(f"DEBUG AUTH: Stored Pass: {stored_password} | Input Pass: {password}")
 
         if not stored_password:
              return None

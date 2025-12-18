@@ -36,7 +36,7 @@ async def call(request: CallKwRequest, env: Environment = Depends(get_env)):
     args = request.args
     kwargs = request.kwargs
     
-    print(f"DEBUG API CALL: {model_name}.{method_name} as {uid}")
+    # print(f"DEBUG API CALL: {model_name}.{method_name} as {uid}")
     
     # Validation
     if not env.registry.get(model_name):
@@ -74,7 +74,6 @@ async def call(request: CallKwRequest, env: Environment = Depends(get_env)):
 
 @api_router.post("/login", response_model=GenericResponse)
 async def login(request: LoginRequest, session: Session = Depends(get_session)):
-    print(f"DEBUG LOGIN ROUTE: {request.login} {request.password}")
     # 1. Create Sudo Env for Auth Check
     async with AsyncDatabase.acquire() as cr:
          sudo_env = Environment(cr, uid=1)
@@ -82,7 +81,6 @@ async def login(request: LoginRequest, session: Session = Depends(get_session)):
          
          # 2. Check Credentials
          uid = await Users._check_credentials(request.login, request.password)
-         print(f"DEBUG LOGIN UID: {uid}")
          
          if uid:
              session.rotate()

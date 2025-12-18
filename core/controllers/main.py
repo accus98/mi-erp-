@@ -57,7 +57,6 @@ async def call_kw(req, env):
     if not model_name or not method_name:
         return Response({'error': 'Invalid Request'}, status=400)
     
-    print(f"DEBUG_TRACE: call_kw ENTRY | Model: {model_name} | Method: {method_name} | UID: {env.uid}", flush=True)
 
     # 3. Dynamic API Validation (Phase 6)
     if method_name in ('create', 'write'):
@@ -134,7 +133,6 @@ async def call_kw(req, env):
             if hasattr(result, 'ids'):
                  result = result.ids
             
-            print(f"DEBUG_TRACE: call_kw EXIT | Result: {str(result)[:100]}...", flush=True)
             return Response({'result': result})
         
     except Exception as e:

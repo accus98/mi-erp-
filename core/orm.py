@@ -1689,6 +1689,79 @@ class Model(metaclass=MetaModel):
             res[name] = info
         return res
 
+    async def get_view_json_schema(self, view_id=None, view_type='form'):
+        """
+        Prototype: Returns standard JSON Schema + UI Schema (JSON Forms compatible).
+        """
+        # 1. Get Field Definitions
+        fields_info = self.fields_get()
+        
+        # 2. Build JSON Schema (Data Structure)
+        json_schema = {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+        
+        # 3. Build UI Schema (Layout)
+        ui_schema = {
+            "type": "VerticalLayout",
+            "elements": []
+        }
+        
+        # Mapping Nexus Types -> JSON Schema Types
+        type_map = {
+            'char': 'string',
+            'text': 'string', 
+            'html': 'string',
+            'integer': 'integer',
+            'float': 'number',
+            'boolean': 'boolean',
+            'date': 'string', # format: date
+            'datetime': 'string', # format: date-time
+            'many2one': 'integer', # ID reference
+            'one2many': 'array',
+            'many2many': 'array',
+            'selection': 'string',
+            'binary': 'string' # base64
+        }
+        
+        for fname, info in fields_info.items():
+            nexus_type = info.get('type', 'char')
+            json_type = type_map.get(nexus_type, 'string')
+            
+            prop = {
+                "type": json_type,
+                "title": info.get('string', fname),
+                "readOnly": info.get('readonly', False)
+            }
+            
+            if nexus_type in ('date', 'datetime'):
+                prop['format'] = nexus_type
+                
+            if nexus_type == 'selection':
+                # info['selection'] is list of tuples? or we need to fetch it?
+                # fields_get usually doesn't return selection options unless asked?
+                # For prototype, we skip enum values or fetch valid options.
+                pass
+
+            json_schema['properties'][fname] = prop
+            
+            if info.get('required'):
+                json_schema['required'].append(fname)
+                
+            # Add to UI Schema (Simple Vertical Layout for now)
+            ui_schema['elements'].append({
+                "type": "Control",
+                "scope": f"#/properties/{fname}",
+                "label": info.get('string', fname)
+            })
+            
+        return {
+            "json_schema": json_schema,
+            "ui_schema": ui_schema
+        }
+
     async def get_view_info(self, view_id=None, view_type='form'):
         """
         Get the Architecture and Fields logic for the UI.
