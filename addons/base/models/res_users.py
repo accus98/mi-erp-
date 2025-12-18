@@ -105,9 +105,9 @@ class ResUsers(Model):
         # Note: res_groups_users_rel table name?
         # In base/models/res_groups.py we define m2m relation?
         # Standard Odoo: res_groups_users_rel with cols gid, uid. Or res_groups_res_users_rel
-        # Code used: res_groups_res_users_rel
+        # Code used: res_groups_res_users_rel (Standard ORM naming)
         await self.env.cr.execute(
-            'SELECT res_groups_id FROM res_groups_users_rel WHERE res_users_id = %s', 
+            'SELECT res_groups_id FROM res_groups_res_users_rel WHERE res_users_id = %s', 
             (self.id,)
         )
         rows = self.env.cr.fetchall()

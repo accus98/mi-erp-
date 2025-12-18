@@ -283,7 +283,9 @@ class Model(metaclass=MetaModel):
         # Global Cache Check
         from .security import AccessCache
         # Tuple must be hashable and sorted for consistency
-        groups_key = tuple(sorted(user_groups)) if user_groups else ()
+        # Ensure no None values
+        safe_groups = [g for g in user_groups if g is not None]
+        groups_key = tuple(sorted(safe_groups)) if safe_groups else ()
         global_key = (groups_key, self._name, operation)
         
         cached_result = AccessCache.get(global_key)
@@ -1168,10 +1170,30 @@ class Model(metaclass=MetaModel):
                 to_insert = []
                 to_delete_params = [] 
                 
-                new_set = set(target_ids)
+                # Logic for Odoo Commands: (6,0,ids), (4,id), (3,id), (5,0,0)
+                # target_ids is the list of commands or flat list of IDs
+                
+                cmds = target_ids
+                if cmds and isinstance(cmds, list) and isinstance(cmds[0], int):
+                    # Flat list -> Treat as replace (6, 0, cmds)
+                    cmds = [(6, 0, cmds)]
                 
                 for rid in self.ids:
                     current_set = existing_map.get(rid, set())
+                    new_set = current_set.copy()
+                    
+                    for cmd in cmds:
+                        if isinstance(cmd, (tuple, list)):
+                            code = cmd[0]
+                            if code == 6: # Replace: (6, 0, [ids])
+                                new_set = set(cmd[2])
+                            elif code == 4: # Add: (4, id, _)
+                                new_set.add(cmd[1])
+                            elif code == 3: # Remove: (3, id, _)
+                                new_set.discard(cmd[1])
+                            elif code == 5: # Unlink All: (5, 0, 0)
+                                new_set.clear()
+                                
                     adding = new_set - current_set
                     removing = current_set - new_set
                     

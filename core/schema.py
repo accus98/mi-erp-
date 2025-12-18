@@ -13,9 +13,10 @@ class SchemaManager:
         Check all registered models and sync schema.
         """
         print("SchemaManager: Starting Migration...")
-        for name, model_cls in Registry.models.items():
+        # Use _models directly to avoid classmethod/property issues
+        for name, model_cls in Registry._models.items():
             if name == 'base': continue # Abstract/Dummy
-            if model_cls._auto:
+            if getattr(model_cls, '_auto', True):
                  await self.sync_model(model_cls)
         print("SchemaManager: Migration Complete.")
 
@@ -82,3 +83,24 @@ class SchemaManager:
                 # Mapping is hard (int4 vs INTEGER).
                 # Skip type check for V1 unless critical mismatch.
                 pass
+        
+        # 3. Check M2M Tables
+        for name, field in model_cls._fields.items():
+            if isinstance(field, Many2many):
+                # Ensure Pivot Table Exists
+                comodel = Registry.get(field.comodel_name)
+                if not comodel: continue
+                
+                t1 = model_cls._table
+                t2 = comodel._table
+                
+                # Logic from Model._auto_init
+                if not field.relation: field.relation = f"{min(t1, t2)}_{max(t1, t2)}_rel"
+                if not field.column1: field.column1 = f"{t1}_id"
+                if not field.column2: field.column2 = f"{t2}_id"
+                
+                # We can call AsyncDatabase.create_pivot_table directly (it uses IF NOT EXISTS)
+                try:
+                    await AsyncDatabase.create_pivot_table(self.cr, field.relation, field.column1, t1, field.column2, t2)
+                except Exception as e:
+                    print(f"Schema Warning (M2M {name}): {e}")
