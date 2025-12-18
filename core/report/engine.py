@@ -5,71 +5,98 @@ try:
 except ImportError:
     pass # Might be imported by registry
 
+class ReportRecordProxy:
+    """
+    Wrapper síncrono para objetos Async. 
+    Se usa SOLO dentro de Jinja2.
+    Requiere que los datos hayan sido precargados en caché o leídos previamente.
+    """
+    def __init__(self, record, extra_context=None):
+        self._record = record
+        self._context = extra_context or {}
+
+    def __getattr__(self, name):
+        # Intentamos obtener del caché síncrono del Environment
+        # 1. Si es un campo del modelo
+        if name in self._record._fields:
+            field = self._record._fields[name]
+            
+            # Hack: Acceso directo al caché síncrono (self.env.cache es un dict)
+            # Clave de cache: (model_name, id, field_name)
+            val = self._record.env.cache.get((self._record._name, self._record.id, name))
+            
+            if val is None:
+                return None # O string vacío
+            
+            # Si es relacional, devolvemos otro Proxy o lista de Proxies
+            if field._type == 'many2one':
+                if not val: return None
+                # val es ID
+                comodel = self._record.env[field.comodel_name].browse(val)
+                return ReportRecordProxy(comodel)
+                
+            elif field._type in ('one2many', 'many2many'):
+                # val es lista de IDs
+                comodel = self._record.env[field.comodel_name].browse(val)
+                return [ReportRecordProxy(r) for r in comodel]
+                
+            return val
+            
+        return getattr(self._record, name)
+
 class ReportEngine:
     def __init__(self, env):
         self.env = env
         # Configurar Jinja2 Loader desde directorios de módulos
-        # Assumes running from root
         self.loader = jinja2.FileSystemLoader(['addons/', 'core/reports/templates/'])
         self.env_jinja = jinja2.Environment(loader=self.loader)
 
     async def render_pdf(self, report_name, docids, data=None):
         """
-        Renders a report to PDF bytes.
-        :param report_name: Name of the report (e.g., 'sales.report_invoice')
-        :param docids: List of IDs to render
-        :param data: Optional extra data context
+        Renders a report to PDF bytes using Async->Sync Proxy pattern.
         """
-        # 1. Obtener Datos
-        # Assuming report_name maps to a model or we assume the caller knows the model
-        # For a generic engine, we usually look up ir.actions.report to find the model.
-        # For this prototype, we'll assume the caller passes the right context or we infer it.
-        # Let's assume report_name is like 'module.template_name' and we need to know the model.
-        # For simpliciy in prototype: The caller often passes the model docs directly or we browse them.
-        
-        # Real Odoo logic: look up ir.actions.report by name -> get model -> browse(docids)
-        # Here we will assume docids are linked to a specific model provided in 'data' or inferred?
-        # Let's assume the user of this engine invokes it with a known model context.
-        
-        # If we stick to the user's snippet:
-        # docs = self.env[report_name].browse(docids) <-- This implies report_name IS the model name?
-        # Usually report_name is 'sale.report_saleorder', model is 'sale.order'.
-        
-        # We will implement a generic basic version as requested.
-        # User snippet: docs = self.env[report_name].browse(docids)
-        # We will modify this to use data['model'] if available, or assume report_name is model.
-        
         model_name = data.get('model') if data else report_name
-        docs = await self.env[model_name].browse(docids).read() # Read data for template?
-        # Browse implies objects. Logic:
-        docs_objs = self.env[model_name].browse(docids)
+        docs = self.env[model_name].browse(docids)
         
-        # 2. Renderizar HTML (Jinja2)
-        # We need to find the template file. 
-        # report_name 'sales.report_invoice' -> addons/sales/report_invoice.html?
-        # Simple mapping for prototype:
+        # --- LA MAGIA: PRE-FETCHING MASIVO ---
+        # Antes de llamar a Jinja (Síncrono), debemos cargar TODO lo que el reporte necesite
+        # en el caché del Environment asíncronamente.
+        
+        # 1. Identificar campos a leer (Optimización futura: leer del template HTML)
+        # Por ahora, leemos TODOS los campos almacenados del modelo principal
+        await docs.read() 
+        
+        # 2. TRUCO: Pre-cargar relaciones comunes (Nivel 1 de profundidad)
+        # Iteramos los campos relaciones y hacemos prefetch
+        fields_to_fetch = [f for f, field in docs._fields.items() if field._type in ('one2many', 'many2many', 'many2one')]
+        
+        # Hacemos un "ensure" de estos campos para disparar la carga en caché
+        if fields_to_fetch:
+             await docs.read(fields_to_fetch)
+             
+             # Nivel 2: Pre-cargar las líneas (ej. invoice_lines)
+             # Esto es un poco "fuerza bruta" pero asegura que Jinja no falle.
+             for fname in fields_to_fetch:
+                 field = docs._fields[fname]
+                 if field._type in ('one2many', 'many2many'):
+                     # Obtener todos los IDs de las lineas
+                     lines = await docs.mapped(fname)
+                     if lines:
+                         await lines.read() # Carga las líneas en caché
+
+        # 3. Envolver en Proxies
+        docs_proxies = [ReportRecordProxy(d) for d in docs]
+        
+        # 4. Renderizar HTML (Jinja2)
         template_path = f"{report_name.replace('.', '/')}.html"
-        
         try:
             template = self.env_jinja.get_template(template_path)
         except jinja2.TemplateNotFound:
-             # Fallback or error
              print(f"Template not found: {template_path}")
              return None
 
-        # Prepare context
-        # We need to ensure 'docs' are accessible. 
-        # In async ORM, accessing fields on 'docs' (browse records) triggers awaitable calls?
-        # Jinja2 is synchronous. We must pre-fetch or use a sync-proxy wrapper.
-        # FOR PROTOTYPE: We pre-read fields or pass raw read() dicts.
-        # Better: Pass the browse objects but warn that lazy loading inside Jinja might fail in async.
-        # FIX: We'll assume for now we pass a list of dicts (read result) as 'docs'.
-        
-        # Read all fields for now (expensive but safe for prototype)
-        docs_data = await docs_objs.read() 
-        
         html_string = template.render({
-            'docs': docs_data,
+            'docs': docs_proxies, # Pasamos los proxies, no los dicts
             'user': self.env.user,
             'company': self.env.company,
             'data': data or {}
