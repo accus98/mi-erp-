@@ -63,7 +63,9 @@ class XmlLoader:
                             raise ValueError(f"Reference not found: {xml_id}")
                         return res
                         
-                    fval = eval(feval, {'ref': ref, 'True': True, 'False': False, 'None': None})
+                    from .safe_eval import safe_eval
+                    # Audit Remediation: Use safe_eval
+                    fval = safe_eval(feval, {'ref': ref})
                     vals[fname] = fval
                 except Exception as e:
                     print(f"Error evaluating {feval} in {xml_id}: {e}")

@@ -62,20 +62,26 @@ class Field(Generic[T]):
              raise RuntimeError(f"AsyncORM: Computed field '{self.name}' not in cache. Usage of sync access is forbidden. Call compute method or read().")
 
         # Stored Field - Cannot execute Sync
-        raise RuntimeError(f"AsyncORM: Field '{self.name}' not in cache. Use await record.read(['{self.name}']) or await record.fetch(['{self.name}']).")
+        raise RuntimeError(f"AsyncORM: Field '{self.name}' not in cache. Use await record.ensure('{self.name}').")
     
     def __set__(self, record, value):
         if record is None: return
         if not record.ids: return
-        # record.ensure_one() # Write handles multiple records!
-        if self.store and not self.compute: 
-             record.write({self.name: value})
         
-        # Update Cache always (for computed fields or write result)
-        # Note: If write() is called, it might update cache too via invalidate/recompute?
-        # But for non-stored computed fields, we MUST update cache here.
+        # 1. Update Cache
         for rid in record.ids:
              record.env.cache[(record._name, rid, self.name)] = value
+             
+        # 2. Trigger Modified (Sync)
+        record._modified([self.name])
+        
+        # 3. Buffer Write if Stored
+        if self.store: 
+             for rid in record.ids:
+                 key = (record._name, rid)
+                 if key not in record.env.pending_writes:
+                     record.env.pending_writes[key] = {}
+                 record.env.pending_writes[key][self.name] = value
 
 class Char(Field[str]):
     _type = 'char'
@@ -146,7 +152,14 @@ class One2many(Field[list['Model']]): # Returns RecordSet (List-like)
     def __get__(self, record, owner) -> list['Model']:
         if record is None or not record.ids: return [] # type: ignore
         record.ensure_one()
-        return record.env[self.comodel_name].search([(self.inverse_name, '=', record.ids[0])]) # type: ignore
+        
+        # Cache Check
+        key = (record._name, record.ids[0], self.name)
+        if key in record.env.cache:
+            ids = record.env.cache[key]
+            return record.env[self.comodel_name].browse(ids) # type: ignore
+            
+        raise RuntimeError(f"AsyncORM: One2many field '{self.name}' not in cache. Use await record.ensure('{self.name}').")
 
 class Many2many(Field[list['Model']]):
     _type = 'many2many'
@@ -164,15 +177,13 @@ class Many2many(Field[list['Model']]):
         if record is None or not record.ids: return [] # type: ignore
         record.ensure_one()
         
-        # Assumption: relation is populated by MetaModel (or user) before runtime usage.
-        if not self.relation:
-             return []
-
-        query = f'SELECT "{self.column2}" FROM "{self.relation}" WHERE "{self.column1}" = %s'
-        record.env.cr.execute(query, (record.ids[0],))
-        res_ids = [r[0] for r in record.env.cr.fetchall()]
-        
-        return record.env[self.comodel_name].browse(res_ids) # type: ignore
+        # Cache Check
+        key = (record._name, record.ids[0], self.name)
+        if key in record.env.cache:
+            ids = record.env.cache[key]
+            return record.env[self.comodel_name].browse(ids) # type: ignore
+            
+        raise RuntimeError(f"AsyncORM: Many2many field '{self.name}' not in cache. Use await record.ensure('{self.name}').")
 
 class Binary(Field[bytes]):
     _type = 'binary'

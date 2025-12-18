@@ -69,12 +69,21 @@ class MetaModel(type):
 
     @staticmethod
     def _register_triggers(cls):
-        for attr_name in dir(cls):
-            val = getattr(cls, attr_name)
-            if hasattr(val, '_depends'):
-                for dep in val._depends:
-                    if dep not in cls._triggers: cls._triggers[dep] = set()
-                    cls._triggers[dep].add(val.__name__)
+        # Map: Source Field -> Set of Target Computed Fields
+        # cls._triggers = {'source_field': {'computed_field_1', 'computed_field_2'}}
+        
+        for name, field in cls._fields.items():
+            if field.compute:
+                method_name = field.compute
+                if hasattr(cls, method_name):
+                    method = getattr(cls, method_name)
+                    # Support @api.depends decoration
+                    depends = getattr(method, '_depends', [])
+                    
+                    for dep in depends:
+                        if dep not in cls._triggers:
+                            cls._triggers[dep] = set()
+                        cls._triggers[dep].add(name) # Add FIELD name, not method name
 
 class Model(metaclass=MetaModel):
     _name = None
@@ -361,11 +370,14 @@ class Model(metaclass=MetaModel):
             'datetime': datetime
         }
         
+        from .tools.safe_eval import safe_eval
+
         for r in rows:
             domain_str = r[0]
             if not domain_str: continue
             try:
-                d = eval(domain_str, eval_context)
+                # Audit Remediation: Use safe_eval
+                d = safe_eval(domain_str, eval_context)
                 global_domains.append(d)
             except Exception as e:
                 print(f"Rule Eval Error on {self._name}: {e}")
@@ -616,6 +628,20 @@ class Model(metaclass=MetaModel):
         
         if total_matched != total_requested:
              raise Exception(f"Access Rule Violation: One or more records in {self._name} are restricted for operation '{operation}'.")
+
+    async def ensure(self, fields_to_ensure):
+        """
+        Ensure specified names are in cache.
+        Wrapper around read() but cleaner semantic.
+        Usage: await record.ensure(['partner_id', 'line_ids'])
+        """
+        if isinstance(fields_to_ensure, str): fields_to_ensure = [fields_to_ensure]
+        
+        # Filter what is missing
+        missing = [f for f in fields_to_ensure if (self._name, self.ids[0], f) not in self.env.cache]
+        if missing:
+             # read populates cache
+             await self.read(missing)
 
     async def read(self, fields=None):
         """
@@ -1007,23 +1033,30 @@ class Model(metaclass=MetaModel):
             if o2m:
                 for k, v in o2m.items():
                      await self._process_one2many(record, k, v)
+        
+        # 6. Trigger Compute
+        all_keys = set()
+        for v in processed_vals_list:
+            all_keys.update(v.keys())
+        
+        records._modified(list(all_keys))
+        await records.recompute()
                      
         return records
 
-    async def write(self, vals):
-        await self.check_access_rights('write')
-        await self.check_access_rule('write')
+    async def _write_db(self, vals):
+        """
+        Low-level write to DB without triggering recompute logic.
+        Used by caching, recompute engine, and write() itself.
+        """
         if not self.ids: return True
         
         m2m_values = {}
         o2m_values = {}
         binary_values = {}
         
-        keys_to_write = list(vals.keys())
-        allowed_keys = await self._filter_authorized_fields('write', keys_to_write)
-        if len(allowed_keys) != len(keys_to_write):
-             pass # raise Exception("Security Error")
-
+        # Note: Access Rights should be checked by caller (write())
+        
         for k, v in list(vals.items()):
             if k in self._fields:
                 field = self._fields[k]
@@ -1089,13 +1122,9 @@ class Model(metaclass=MetaModel):
                     for tid in removing: to_delete_params.append((rid, tid))
                          
                 if to_delete_params:
-                     # Native Batch Delete ($1, $2)
-                     # AsyncPG executemany expects native placeholders relative to the tuple size.
-                     # "DELETE ... $1 ... $2"
                      await self.env.cr.executemany(f'DELETE FROM "{f_obj.relation}" WHERE "{f_obj.column1}" = $1 AND "{f_obj.column2}" = $2', to_delete_params)
 
                 if to_insert:
-                    # Native Batch Insert ($1, $2)
                     await self.env.cr.executemany(f'INSERT INTO "{f_obj.relation}" ("{f_obj.column1}", "{f_obj.column2}") VALUES ($1, $2)', to_insert)
                           
         if o2m_values:
@@ -1106,6 +1135,24 @@ class Model(metaclass=MetaModel):
         if binary_values:
             for record in self:
                 await self._write_binary(record, binary_values)
+
+        return True
+
+    async def write(self, vals):
+        await self.check_access_rights('write')
+        await self.check_access_rule('write')
+        
+        keys_to_write = list(vals.keys())
+        allowed_keys = await self._filter_authorized_fields('write', keys_to_write)
+        if len(allowed_keys) != len(keys_to_write):
+             pass # raise Exception("Security Error")
+
+        # 1. DB Write (No Triggers)
+        await self._write_db(vals.copy())
+        
+        # 2. Trigger Compute Logic
+        self._modified(list(vals.keys()))
+        await self.recompute()
 
         return True
 
@@ -1166,15 +1213,101 @@ class Model(metaclass=MetaModel):
             self.env.cache[(record._name, record.id, fname)] = datas
 
 
-    def _recompute(self, changed_fields):
-        todo = set()
-        for field in changed_fields:
-            if field in self._triggers:
-                for method_name in self._triggers[field]:
-                    todo.add(method_name)
-        for method_name in todo:
-            method = getattr(self, method_name)
-            method()
+    def _modified(self, fields_modified):
+        """
+        Mark fields dependent on 'fields_modified' as dirty.
+        Propagates invalidation recursively.
+        """
+        if not self._triggers: return
+        
+        # 1. Identify direct triggers
+        todo_fields = set()
+        for f in fields_modified:
+            if f in self._triggers:
+                todo_fields.update(self._triggers[f])
+                
+        if not todo_fields: return
+        
+        # 2. Add to global compute queue
+        for fname in todo_fields:
+            field = self._fields[fname]
+            
+            # If stored, we need to recompute and write
+            # If not stored, we just invalidate cache so next read fetches fresh
+            if field.store:
+                for rid in self.ids:
+                    self.env.to_compute.add((self._name, rid, fname))
+            else:
+                 # Just Cache Invalidation
+                 for rid in self.ids:
+                     key = (self._name, rid, fname)
+                     if key in self.env.cache:
+                         del self.env.cache[key]
+                         
+    async def recompute(self):
+        """
+        Process the recompute queue and flush pending writes.
+        """
+        iteration = 0
+        MAX_ITER = 100
+        
+        while self.env.to_compute:
+            iteration += 1
+            if iteration > MAX_ITER:
+                 raise RecursionError("Infinite Loop in Recompute Graph")
+            
+            queue = list(self.env.to_compute)
+            self.env.to_compute.clear() 
+            
+            # Group by Model+Field
+            groups = {}
+            for mname, rid, fname in queue:
+                key = (mname, fname)
+                if key not in groups: groups[key] = set()
+                groups[key].add(rid)
+                
+            # Process Groups
+            for (mname, fname), rids in groups.items():
+                Model = self.env[mname]
+                field = Model._fields[fname]
+                records = Model.browse(list(rids))
+                
+                if field.compute:
+                    method = getattr(records, field.compute)
+                    if inspect.iscoroutinefunction(method):
+                        await method()
+                    else:
+                        method()
+
+        # Flush Pending Writes
+        if self.env.pending_writes:
+            model_writes = {}
+            for (mname, rid), vals in self.env.pending_writes.items():
+                if mname not in model_writes: model_writes[mname] = {}
+                model_writes[mname][rid] = vals
+            
+            self.env.pending_writes.clear()
+            
+            for mname, id_vals_map in model_writes.items():
+                Model = self.env[mname]
+                
+                # Group IDs by VALUES to batch write
+                vals_to_ids = {} 
+                
+                for rid, vals in id_vals_map.items():
+                    try:
+                        # Convert to hashable key
+                        # Handle basic types. Lists (M2M commands) must be handled carefully.
+                        # Simple: tuple of sorted items.
+                        key = tuple(sorted(vals.items()))
+                        if key not in vals_to_ids: vals_to_ids[key] = []
+                        vals_to_ids[key].append(rid)
+                    except TypeError:
+                        # Fallback for unhashable values
+                        await Model.browse([rid])._write_db(vals)
+                        
+                for key_items, rids in vals_to_ids.items():
+                    await Model.browse(rids)._write_db(dict(key_items))
 
     async def unlink(self):
         await self.check_access_rights('unlink')

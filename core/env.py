@@ -13,6 +13,8 @@ class Environment:
         self.cache = {}
         self._model_cache = {} # Cache for model classes/instances
         self.permission_cache = {} # Cache for access rights: {(model_name, operation): bool}
+        self.to_compute = set() # Queue for recomputation: {(model_name, id, field_name)}
+        self.pending_writes = {} # {(model_name, id): {field_name: value}}
 
     @property
     def registry(self):
