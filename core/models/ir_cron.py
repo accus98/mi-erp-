@@ -25,102 +25,108 @@ class IrCron(Model):
         from core.env import Environment
         from core.registry import Registry
         from core.logger import logger
-        import inspect
         
-        # Connect
+        # 1. Fetch Jobs (Short Transaction)
+        jobs_data = [] # (id, name, nextcall, interval...)
         try:
-            # Ensure registry is loaded
-            # Registry loading is async? No, usually imports. 
-            # But auto_init is async.
-            # Assuming Registry is ready or loaded at startup.
-                
             async with AsyncDatabase.acquire() as cr:
                 env = Environment(cr, uid=1, context={})
                 Cron = env['ir.cron']
                 
-                # Find jobs
+                # Check for jobs due
+                # We fetch matching IDs and basic data to avoid holding the cursor
+                # active while processing jobs (which might take time).
+                # Actually, iterate search result.
+                
                 now = datetime.now()
-                # Simple search, filter in python for safety
-                jobs = await Cron.search([('active', '=', True)])
+                # Search Active
+                # We need to use SQL or ORM. ORM is fine.
+                candidates = await Cron.search([('active', '=', True)])
                 
-                to_run = []
-                for job in jobs:
-                    # job.nextcall Is it string or datetime? ORM casts?
-                    # current ORM seems to return what driver returns (datetime for timestamp)
-                    next_call = job.nextcall
-                    if isinstance(next_call, str):
-                         try:
-                             next_call = datetime.fromisoformat(next_call)
-                         except:
-                             pass
+                for candidate in candidates:
+                    # Parse nextcall
+                    nxt = candidate.nextcall
+                    if isinstance(nxt, str):
+                        try:
+                            nxt = datetime.fromisoformat(nxt)
+                        except:
+                            continue
                     
-                    if next_call and next_call <= now:
-                        to_run.append(job)
-                
-                if not to_run:
-                    # logger.debug("Cron: No jobs to run.")
-                    pass
-    
-                for job in to_run:
-                    logger.info(f"Cron: Processing {job.name}...")
-                    try:
-                        # Execute
-                        model = env[job.model_id.model] # model_id is record, .model is name
-                        # Need to fetch model name? model_id is Many2one -> Record.
-                        # We need to await read or access pre-fetched.
-                        # Assuming 'model_id' field name isn't pre-fetched?
-                        # await job.read(['model_id']) # Not fully implemented nesting
-                        # But lazy loading might fail in Async if cache miss.
-                        # Let's assume we need to access via id or ensure.
-                        # Simplification: use job.model_id.model but handle async?
-                        # Async ORM nested access `job.model_id` returns Record.
-                        # `record.model` needs another get.
-                        # Let's manually fetch model name from ir_model table to be safe?
-                        # Or await job.model_id.read(['model'])?
-                        
-                        m_rec = job.model_id
-                        await m_rec.read(['model'])
-                        model_name = m_rec.model
-                        
-                        model_inst = env[model_name]
-                        
-                        if hasattr(model_inst, job.method):
-                            method = getattr(model_inst, job.method)
-                            if inspect.iscoroutinefunction(method):
-                                await method()
-                            else:
-                                method()
-                        else:
-                            logger.error(f"Cron Error: Method {job.method} not found in {model_name}")
-                        
-                        # Update Next Call
-                        new_call = now
-                        if job.interval_type == 'minutes':
-                            new_call += timedelta(minutes=job.interval_number)
-                        elif job.interval_type == 'hours':
-                            new_call += timedelta(hours=job.interval_number)
-                        elif job.interval_type == 'days':
-                            new_call += timedelta(days=job.interval_number)
-                        
-                        await job.write({'nextcall': new_call})
-                        # Commit is implicit in Async context manager? No.
-                        # AsyncDatabase doesn't auto commit?
-                        # asyncpg connection is autocommit unless transaction.
-                        # If we are in 'acquire', it yields a connection.
-                        # If we want transaction, we use 'transaction()'.
-                        # Let's assume autocommit for now or manual commit not needed in asyncpg default mode?
-                        # Actually asyncpg is distinct. We might need explicit transaction blocking if `acquire` doesn't start one.
-                        # Usually logic: logic should succeed or fail.
-                        logger.info(f"Cron: Finished {job.name}")
-                        
-                    except Exception as e:
-                        logger.error(f"Cron Failure {job.name}: {e}", exc_info=True)
-                        # Don't rollback whole loop?
-                        # Individual job failure shouldn't kill others?
-            
+                    if nxt and nxt <= now:
+                         jobs_data.append(candidate.id)
+                         
         except Exception as e:
-            from core.logger import logger
-            logger.critical(f"Cron Runner Error: {e}", exc_info=True)
+            logger.error(f"Cron Fetch Error: {e}")
+            return
+
+        if not jobs_data:
+             return
+
+        # 2. Process Each Job (Isolated Transaction)
+        for job_id in jobs_data:
+             await cls._run_job_isolated(job_id)
+
+    @classmethod
+    async def _run_job_isolated(cls, job_id):
+        from core.db_async import AsyncDatabase
+        from core.env import Environment
+        from core.logger import logger
+        import inspect
+        from datetime import datetime, timedelta
+        
+        try:
+            async with AsyncDatabase.acquire() as cr:
+                env = Environment(cr, uid=1, context={})
+                job = await env['ir.cron'].browse([job_id]).read()
+                if not job: return # Deleted?
+                job = env['ir.cron'].browse([job_id]) # Browse object
+                
+                logger.info(f"Cron: Processing {job.name}...")
+                
+                # Lock job? (Optional for now, single worker assumed)
+                
+                # Resolve Model/Method
+                # Need to read relation field 'model' from 'model_id'
+                # Pre-read model_id to ensure we have it
+                m_rec = job.model_id
+                await m_rec.read(['model'])
+                model_name = m_rec.model
+                
+                if model_name not in env:
+                    logger.error(f"Cron Error: Model {model_name} not found registry.")
+                    return
+
+                model_inst = env[model_name]
+                
+                if hasattr(model_inst, job.method):
+                    method = getattr(model_inst, job.method)
+                    
+                    # Execute
+                    if inspect.iscoroutinefunction(method):
+                        await method()
+                    else:
+                        method()
+                        
+                    # Update Next Call
+                    now = datetime.now()
+                    new_call = now
+                    if job.interval_type == 'minutes':
+                        new_call += timedelta(minutes=job.interval_number)
+                    elif job.interval_type == 'hours':
+                        new_call += timedelta(hours=job.interval_number)
+                    elif job.interval_type == 'days':
+                        new_call += timedelta(days=job.interval_number)
+                    
+                    await job.write({'nextcall': new_call})
+                    logger.info(f"Cron: Finished {job.name}")
+                    
+                else:
+                    logger.error(f"Cron Error: Method {job.method} not found in {model_name}")
+
+        except Exception as e:
+            logger.error(f"Cron Failure Job {job_id}: {e}", exc_info=True)
+            # Transaction (acquire block) rolls back automatically on exception.
+            # Other jobs are unaffected.
 
     @staticmethod
     async def runner_loop():

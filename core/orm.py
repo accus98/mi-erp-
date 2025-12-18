@@ -1954,13 +1954,19 @@ class Model(metaclass=MetaModel):
                 
         if not final_ids: return
 
-        ids_list = list(final_ids)
-        placeholders = ", ".join(["%s"] * len(ids_list))
-        # Ensure we construct valid SQL with quotes
-        safe_fields = [f'"{f}"' for f in field_names]
-        query = f'SELECT id, {", ".join(safe_fields)} FROM "{self._table}" WHERE id IN ({placeholders})'
+        # Pypika Refactor
+        t = Table(self._table)
+        q = Query.from_(t).select(t.id)
         
-        await self.env.cr.execute(query, tuple(ids_list))
+        for f in field_names:
+            if f in self._fields:
+                 # Whitelist field check ensures safety
+                 q = q.select(t[f])
+                 
+        # IN clause with integers is safe to render inline
+        q = q.where(t.id.isin(list(final_ids)))
+        
+        await self.env.cr.execute(q.get_sql())
         rows = self.env.cr.fetchall()
         for row in rows:
             id_val = row[0]
@@ -1971,23 +1977,35 @@ class Model(metaclass=MetaModel):
     async def _auto_init(cls, cr):
         cols = []
         constraints = []
-        m2m_fields = []
-
+        # Pypika DDL Refactor
+        from pypika import Column
+        
+        q = Query.create_table(cls._table).if_not_exists()
+        
+        # 1. Define Columns
         for name, field in cls._fields.items():
             if field._sql_type:
-                if name == 'id': 
-                    col_def = '"id" INTEGER PRIMARY KEY AUTOINCREMENT'
+                if name == 'id':
+                    # Postgres Serial Primary Key
+                    q = q.columns(Column('id', 'SERIAL PRIMARY KEY', nullable=False))
                 else:
-                    col_def = f'"{name}" {field._sql_type}'
+                    q = q.columns(Column(name, field._sql_type))
                 
+                # 2. Constraints (FKs)
                 if isinstance(field, Many2one):
                     ref = field.comodel_name.replace('.', '_')
-                    constraints.append(f'FOREIGN KEY ("{name}") REFERENCES "{ref}" (id) ON DELETE {field.ondelete.upper()}')
-                cols.append(col_def)
+                    # Pypika foreign_key
+                    q = q.foreign_key(
+                        columns=[name], 
+                        reference_table=ref, 
+                        reference_columns=['id'], 
+                        on_delete=field.ondelete.upper()
+                    )
+
             elif isinstance(field, Many2many):
                 m2m_fields.append((name, field))
 
-        await AsyncDatabase.create_table(cr, cls._table, cols, constraints)
+        await cr.execute(q.get_sql())
         
         for name, field in m2m_fields:
             comodel = Registry.get(field.comodel_name)

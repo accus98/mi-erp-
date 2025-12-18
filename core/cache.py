@@ -176,5 +176,40 @@ class RedisCache:
         except Exception as e:
             print(f"Cache Error (invalidate): {e}")
 
+    async def delete_pattern(self, pattern: str):
+        """
+        Safely delete keys matching a pattern using SCAN.
+        Verified async non-blocking.
+        """
+        if not self.initialized: await self.initialize()
+        
+        try:
+            if self.use_redis:
+                keys_to_del = []
+                # scan_iter matches glob-style patterns
+                async for key in self.redis.scan_iter(match=pattern):
+                    keys_to_del.append(key)
+                    if len(keys_to_del) >= 1000:
+                        # Batch delete in chunks
+                        await self.redis.delete(*keys_to_del)
+                        keys_to_del = []
+                
+                if keys_to_del:
+                    await self.redis.delete(*keys_to_del)
+                    
+                print(f"Cache: Deleted pattern '{pattern}'")
+            else:
+                # L1 Memory Fallback (Naive loop)
+                # Iterate copy of keys to avoid runtime change error
+                for key in list(self.memory_store.keys()):
+                    # Very simple glob check? or Startswith?
+                    # Redis patterns are glob-like.
+                    # As fallback, let's assume prefix match if pattern ends with *
+                    if pattern == "*" or (pattern.endswith("*") and str(key).startswith(pattern[:-1])):
+                         del self.memory_store[key]
+
+        except Exception as e:
+            print(f"Cache Error (delete_pattern): {e}")
+
 # Global Instance
 Cache = RedisCache()

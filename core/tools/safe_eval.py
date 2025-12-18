@@ -49,36 +49,8 @@ def safe_eval(expr, globals_dict=None, locals_dict=None):
             raise ValueError(f"Safe Eval Error on '{expr}': {error_msg}")
             
     else:
-        # FALLBACK (Legacy/Unsafe) - Just in case install fails temporarily
-        # Warning already printed globally. Not repeating per call to avoid spam.
-        
-        safe_globals = {
-            '__builtins__': {}, 
-            'datetime': datetime,
-            'time': time,
-            'len': len,
-            'str': str,
-            'int': int,
-            'float': float,
-            'bool': bool,
-            'list': list,
-            'dict': dict,
-            'tuple': tuple,
-            'set': set,
-            'True': True,
-            'False': False,
-            'None': None,
-        }
-        
-        ctx = safe_globals.copy()
-        ctx.update(globals_dict)
-        if locals_dict: ctx.update(locals_dict)
-        ctx['__builtins__'] = {} 
-        
-        if '__' in expr:
-            raise ValueError("Security Error: Double underscores not allowed in domains.")
-            
-        try:
-            return eval(expr, ctx)
-        except Exception as e:
-            raise ValueError(f"Safe Eval (Legacy) Error on '{expr}': {e}")
+        # CRITICAL SECURITY FIX: RCE Prevention
+        # We DO NOT fall back to eval() if asteval is missing.
+        # The risk of sandbox escape is too high.
+        raise ImportError("CRITICAL: 'asteval' library is missing. Safe execution is impossible. Please install it.")
+

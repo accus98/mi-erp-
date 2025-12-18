@@ -55,16 +55,8 @@ class AccessCache:
     async def invalidate(cls):
         """
         Clears ACL cache.
+        Removes all 'acl:*' keys from Redis.
         """
         if not Cache.initialized: await Cache.initialize()
-        # Pattern delete is expensive in Redis.
-        # Ideally we use a namespace or just let them expire.
-        # Or Cache.delete_pattern("acl:*")
-        # For now, we assume Cache has delete_pattern or we just accept TTL expiry.
-        # Or we rely on 'invalidate_model' generic mechanism?
-        # AccessCache is global, not per model really (it is per model key).
-        # We can implement Cache.clear_namespace("acl") if supported.
-        # Or loop?
-        # Let's rely on TTL (10m) for now to avoid complexity, 
-        # or assuming Cache.redis allows scan/delete.
-        pass
+        
+        await Cache.delete_pattern("acl:*")

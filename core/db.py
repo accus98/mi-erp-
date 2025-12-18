@@ -48,11 +48,14 @@ class Database:
             pass
             
             if not password:
-                if env_type == 'dev':
-                    print("DB Warning: Using default password '1234' for Dev.")
-                    password = '1234'
-                else:
-                    raise ValueError("CRITICAL: DB_PASSWORD environment variable is not set!")
+                # CRITICAL SECURITY FIX: No default attributes in code.
+                # Must be provided via .env
+                msg = (
+                    "CRITICAL SECURITY ERROR: 'DB_PASSWORD' is not set.\n"
+                    "1. Check your .env file.\n"
+                    "Application cannot connect to database without credentials."
+                )
+                raise ValueError(msg)
             
             try:
                 # ThreadedConnectionPool ensures thread-safety.
@@ -114,15 +117,15 @@ class Database:
         # 1. Sanitize Columns
         safe_cols = []
         for col in columns:
+            # Security Check: Prevent SQL Injection in Column Definition
+            # DDL is sensitive. We block comments and terminators.
+            if ";" in col or "--" in col or "/*" in col:
+                 raise ValueError(f"Security Error: Invalid characters in column definition '{col}'")
+                 
             # SQLite "INTEGER PRIMARY KEY AUTOINCREMENT" -> Postgres "SERIAL PRIMARY KEY"
             # Since our ORM usually sends '"id" INTEGER PRIMARY KEY AUTOINCREMENT'
             if "INTEGER PRIMARY KEY AUTOINCREMENT" in col:
                 col = col.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
-            
-            # SQLite "INTEGER" -> Postgres "INTEGER" (OK)
-            # SQLite "VARCHAR" -> Postgres "VARCHAR" (OK)
-            # SQLite "TEXT" -> Postgres "TEXT" (OK)
-            # SQLite "BOOLEAN" -> Postgres "BOOLEAN" (OK)
             
             safe_cols.append(col)
             
