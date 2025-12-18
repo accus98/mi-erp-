@@ -28,7 +28,7 @@ async def login(req, env):
         req.session.uid = uid
         req.session.login = login
         req.session.save() # Persist
-        return Response({'result': {'uid': uid, 'session_id': req.session.sid}})
+        return Response({'result': {'uid': uid, 'session_id': req.session.sid, 'csrf_token': req.session.csrf_token}})
     else:
         return Response({'error': 'Access Denied'}, status=401)
 
@@ -165,4 +165,11 @@ async def destroy(req, env):
 
 @route('/web/session/check', auth='user')
 async def check(req, env):
-    return Response({'result': {'uid': req.session.uid, 'login': req.session.login}})
+    return Response({'result': {'uid': req.session.uid, 'login': req.session.login, 'csrf_token': req.session.csrf_token}})
+
+@route('/web/session/token', auth='user')
+async def get_token(req, env):
+    """
+    Returns the CSRF token for the current session.
+    """
+    return Response({'result': {'token': req.session.csrf_token}})

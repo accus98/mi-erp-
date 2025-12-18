@@ -7,6 +7,7 @@ export const useSessionStore = defineStore('session', () => {
     const uid = ref(localStorage.getItem('session_uid') ? parseInt(localStorage.getItem('session_uid')) : null);
     const sessionId = ref(localStorage.getItem('session_sid'));
     const loginName = ref(localStorage.getItem('session_login'));
+    const csrfToken = ref(localStorage.getItem('csrf_token'));
 
     // Getters
     const isLoggedIn = computed(() => !!uid.value);
@@ -42,6 +43,13 @@ export const useSessionStore = defineStore('session', () => {
                 return false;
             }
 
+            // Update State (including CSRF)
+            const data = await response.json();
+            if (data.result && data.result.csrf_token) {
+                csrfToken.value = data.result.csrf_token;
+                localStorage.setItem('csrf_token', csrfToken.value);
+            }
+
             log("Restore: Success. Returning true.");
             return true;
         } catch (e) {
@@ -70,6 +78,7 @@ export const useSessionStore = defineStore('session', () => {
                 uid.value = data.result.uid;
                 sessionId.value = data.result.session_id;
                 loginName.value = username;
+                csrfToken.value = data.result.csrf_token;
 
                 log("Assigned UID: " + uid.value);
 
@@ -77,6 +86,9 @@ export const useSessionStore = defineStore('session', () => {
                 localStorage.setItem('session_uid', uid.value);
                 localStorage.setItem('session_sid', sessionId.value);
                 localStorage.setItem('session_login', loginName.value);
+                if (csrfToken.value) {
+                    localStorage.setItem('csrf_token', csrfToken.value);
+                }
                 log("Persisted to LocalStorage.");
 
                 return true;
@@ -98,12 +110,14 @@ export const useSessionStore = defineStore('session', () => {
         uid.value = null;
         sessionId.value = null;
         loginName.value = null;
+        csrfToken.value = null;
         logs.value = []; // Clear logs
 
         // Clear persistence
         localStorage.removeItem('session_uid');
         localStorage.removeItem('session_sid');
         localStorage.removeItem('session_login');
+        localStorage.removeItem('csrf_token');
 
         // Reload to clear state completely
         window.location.reload();

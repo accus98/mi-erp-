@@ -535,7 +535,15 @@ class Model(metaclass=MetaModel):
             else:
                 where_clause = f"({where_clause}) AND ({converted_rule})"
         
-        query = f'SELECT id FROM "{self._table}" WHERE {where_clause}'
+        # 3. Build Query using Pypika (Audit Remediation)
+        from .tools.query import QueryBuilder
+        qb = QueryBuilder(self._table).select('id')
+        base_query = qb.get_sql()
+        
+        # Append WHERE clause manually (Hybrid approach)
+        # Pypika doesn't easily ingest pre-cooked SQL strings for Where without unsafeness.
+        # But our where_clause is already parameterized ($n) via SQLParams.
+        query = f'{base_query} WHERE {where_clause}'
         
         if order:
             # Secure Validation

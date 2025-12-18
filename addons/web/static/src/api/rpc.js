@@ -25,6 +25,24 @@ export const rpc = {
 
         log(`RPC Call: ${model}.${method}`);
 
+        // CSRF Token Management
+        let csrfToken = localStorage.getItem('csrf_token');
+        if (!csrfToken) {
+            // Lazy Fetch for existing sessions lacking token
+            try {
+                const tRes = await fetch('/web/session/token', { method: 'GET', credentials: 'include' });
+                if (tRes.ok) {
+                    const tData = await tRes.json();
+                    if (tData.result && tData.result.token) {
+                        csrfToken = tData.result.token;
+                        localStorage.setItem('csrf_token', csrfToken);
+                    }
+                }
+            } catch (e) {
+                console.warn("RPC: Failed to auto-fetch CSRF token", e);
+            }
+        }
+
         let response;
         try {
             response = await fetch('/web/dataset/call_kw', {
@@ -32,6 +50,7 @@ export const rpc = {
                 headers: {
                     'Content-Type': 'application/json',
                     'X-Nexo-Session-Id': localStorage.getItem('session_sid') || '',
+                    'X-CSRF-Token': csrfToken || ''
                 },
                 credentials: 'include', // Force sending cookies
                 body: JSON.stringify(payload)

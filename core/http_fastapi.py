@@ -95,7 +95,7 @@ class Session:
     def new(cls):
         sid = str(uuid.uuid4())
         sess = cls(sid)
-        # Don't save empty immediately? Or yes to establish cookie.
+        sess.csrf_token = str(uuid.uuid4()) # Generate CSRF Token
         sess.save()
         return sess
 
@@ -109,6 +109,7 @@ class Session:
             sess.uid = data.get('uid')
             sess.login = data.get('login')
             sess.context = data.get('context', {})
+            sess.csrf_token = data.get('csrf_token') or str(uuid.uuid4()) # Auto-heal if missing
             return sess
         return None
 
@@ -117,10 +118,14 @@ class Session:
         """
         Regenerate Session ID to prevent Fixation Attacks.
         Moves data to new ID and deletes old one.
+        CSRF Token is *preserved* or *rotated*?
+        Usually preserved to allow in-flight requests, or rotated for max security.
+        Let's rotate it too for fresh login state.
         """
         old_sid = self.sid
         # Create new ID
         self.sid = str(uuid.uuid4())
+        self.csrf_token = str(uuid.uuid4()) # Rotate CSRF
         # Save new
         self.save()
         # Delete old
@@ -131,7 +136,8 @@ class Session:
         data = {
             'uid': self.uid,
             'login': self.login,
-            'context': self.context
+            'context': self.context,
+            'csrf_token': getattr(self, 'csrf_token', None)
         }
         # TTL 1 day
         Cache.set(f"session:{self.sid}", data, ttl=86400)
@@ -194,7 +200,17 @@ for path, info in ROUTES.items():
     # Wrapper function generator
     def make_handler(func, auth):
         async def handler(request: Request, response: Response, session: Session = Depends(get_session)):
-            # Auth Check
+            # 1. CSRF Protection (Audit Remediation)
+            if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+                # Exempt login
+                if request.url.path == "/web/login":
+                    pass
+                else:
+                    csrf_header = request.headers.get("X-CSRF-Token")
+                    if not csrf_header or csrf_header != session.csrf_token:
+                         return JSONResponse(status_code=403, content={"error": "CSRF Validation Failed. Please refresh the page."})
+
+            # 2. Auth Check
             if auth == 'user' and not session.uid:
                  return JSONResponse(status_code=403, content={"error": "Login Required"})
 
