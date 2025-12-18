@@ -63,8 +63,13 @@ load_modules()
 async def lifespan(app: FastAPI):
     # Startup: Open DB Pool
     await AsyncDatabase.initialize()
+    
+    # Start PG Listener
+    task = asyncio.create_task(pg_listener())
+    
     yield
     # Shutdown: Close Pool
+    # task.cancel() # Optional
     await AsyncDatabase.close()
 
 app = FastAPI(lifespan=lifespan)
@@ -76,6 +81,67 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(api_router)
+
+# --- WebSockets Logic ---
+from fastapi import WebSocket, WebSocketDisconnect
+from core.bus import bus
+import asyncio
+import json
+
+@app.websocket("/ws/notifications")
+async def websocket_endpoint(websocket: WebSocket):
+    await bus.connect(websocket)
+    try:
+        while True:
+            # Keep alive / Heartbeat
+            # Just read text, we don't expect client messages yet
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        bus.disconnect(websocket)
+    except Exception as e:
+        print(f"WS Error: {e}")
+        bus.disconnect(websocket)
+
+async def pg_listener():
+    """
+    Background Task to listen for Postgres notifications.
+    """
+    import asyncio
+    print("PG Listener: Starting...")
+    while True:
+        try:
+            pool = AsyncDatabase.get_pool()
+            if not pool:
+                await asyncio.sleep(1)
+                continue
+                
+            # Acquire Dedicated Connection
+            async with pool.acquire() as conn:
+                print("PG Listener: Connected to DB. Listening on 'record_change'...")
+                
+                # Callback (must be non-blocking)
+                def on_notify(conn, pid, channel, payload):
+                    # print(f"PG Notify: {payload}")
+                    try:
+                        data = json.loads(payload)
+                        asyncio.create_task(bus.broadcast(data))
+                    except Exception as e:
+                        print(f"PG Notify Error: {e}")
+
+                await conn.add_listener('record_change', on_notify)
+                
+                # Halt loop to keep connection open
+                while True:
+                    await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            print("PG Listener: Cancelled")
+            break
+        except Exception as e:
+            print(f"PG Listener Crash: {e}. Retrying in 5s...")
+            await asyncio.sleep(5)
+            
+# ------------------------
+
 
 # Async Session Logic
 class Session:

@@ -89,12 +89,27 @@ class DomainParser:
                             stack.append(f'"{field}" {operator} ({placeholders})')
                             params.extend(value)
                 else:
-                    if param_builder:
-                        ph = param_builder.add(value)
-                        stack.append(f'"{field}" {operator} {ph}')
+                    if operator == '@@':
+                        # Native Full-Text Search
+                        # to_tsvector('spanish', field) @@ plainto_tsquery('spanish', value)
+                        # We use 'spanish' hardcoded for now or use 'simple'?
+                        # Ideally configured. Let's start with 'simple' for universality or 'spanish' as requested?
+                        # User logic implies Spanish ERP.
+                        config = 'spanish'
+                        
+                        if param_builder:
+                            ph = param_builder.add(value)
+                            stack.append(f"to_tsvector('{config}', \"{field}\") @@ plainto_tsquery('{config}', {ph})")
+                        else:
+                            stack.append(f"to_tsvector('{config}', \"{field}\") @@ plainto_tsquery('{config}', %s)")
+                            params.append(value)
                     else:
-                         stack.append(f'"{field}" {operator} %s')
-                         params.append(value)
+                        if param_builder:
+                            ph = param_builder.add(value)
+                            stack.append(f'"{field}" {operator} {ph}')
+                        else:
+                             stack.append(f'"{field}" {operator} %s')
+                             params.append(value)
                 
         # If param_builder was used, params list is empty (managed by builder)
         # If not, we must reverse the gathered params because we parsed Right-To-Left

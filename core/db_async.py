@@ -40,6 +40,10 @@ class AsyncDatabase:
                 raise e
 
     @classmethod
+    def get_pool(cls):
+        return _pool
+
+    @classmethod
     async def close(cls):
         global _pool
         if _pool:
@@ -108,6 +112,76 @@ class AsyncDatabase:
         except Exception as e:
             print(f"Error creating pivot {table_name}: {e}")
             raise e
+
+    @classmethod
+    async def create_index(cls, cr, table_name, column_name, method='btree', index_name=None):
+        """
+        Create Database Index.
+        method: 'btree', 'gin', 'gist'
+        """
+        cls._validate_identifier(table_name)
+        if index_name: cls._validate_identifier(index_name)
+        
+        # Postgres specific index creation
+        if not index_name:
+            index_name = f"{table_name}_{column_name}_idx"
+            # Postgres truncates names but let's be safe
+            if len(index_name) > 63: index_name = index_name[:63]
+            
+        sql_method = method.upper()
+        if sql_method not in ('BTREE', 'GIN', 'GIST'):
+             sql_method = 'BTREE'
+             
+        # Support for GIN Trigram/TSVector
+        if sql_method == 'GIN':
+            # Assume Trigram for Char/Text fields if method is GIN
+            # This requires pg_trgm extension generally, OR explicit opclass.
+            # For simplicity, we assume we want gin_trgm_ops for text search
+            # OR we assume to_tsvector() logic at Application Layer?
+            # User requirement: "Native Full-Text Search (tsvector)"
+            # A GIN index on a TEXT column usually requires to_tsvector(col) OR pg_trgm.
+            # If we index the RAW column with GIN, we likely want `gin_trgm_ops` for `LIKE '%x%'`.
+            # But task says `tsvector`.
+            # Let's support creating Functional Index if column_name contains parentheses?
+            # No, let's allow column_name to be an expression? 
+            # DANGER: Injection.
+            
+            # SAFE APPROACH:
+            # If method='gin', we assume we want an index for Full Text.
+            # Depending on usage.
+            # For now, simplistic: CREATE INDEX name ON table USING method (col);
+            pass
+
+        # We treat column_name as strict identifier for safety unless it looks like an expression?
+        # Let's enforce identifier for now.
+        # If we want functional index, we might need a separate method 'create_functional_index'.
+        # Or relax validation slightly for known safe functions.
+        
+        cls._validate_identifier(column_name)
+        
+        # Check if exists
+        # In Postgres, IF NOT EXISTS is available in newer versions (9.5+)
+        query = f'CREATE INDEX IF NOT EXISTS "{index_name}" ON "{table_name}" USING {sql_method} ("{column_name}")'
+        
+        # For Trigram GIN specifically:
+        # USING GIN (name gin_trgm_ops)
+        
+        if method == 'gin_trgm':
+             # Check extension?
+             # await cr.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+             query = f'CREATE INDEX IF NOT EXISTS "{index_name}" ON "{table_name}" USING GIN ("{column_name}" gin_trgm_ops)'
+             
+        elif method == 'fulltext':
+             # Native TSVector Index
+             # We default to spanish as per project assumption
+             config = 'spanish'
+             query = f"CREATE INDEX IF NOT EXISTS \"{index_name}\" ON \"{table_name}\" USING GIN (to_tsvector('{config}', \"{column_name}\"))"
+        
+        try:
+             await cr.execute(query)
+        except Exception as e:
+             print(f"Index Creation Error {index_name}: {e}")
+             pass
 
 class AsyncCursor:
     def __init__(self, conn):

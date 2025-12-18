@@ -12,3 +12,21 @@ class IrModelAccess(Model):
     perm_write = Boolean(string='Write Access')
     perm_create = Boolean(string='Create Access')
     perm_unlink = Boolean(string='Delete Access')
+
+    async def create(self, vals):
+        from core.security import AccessCache
+        res = await super().create(vals)
+        AccessCache.invalidate()
+        return res
+
+    async def write(self, vals):
+        from core.security import AccessCache
+        res = await super().write(vals)
+        AccessCache.invalidate()
+        return res
+
+    async def unlink(self):
+        from core.security import AccessCache
+        res = await super().unlink()
+        AccessCache.invalidate()
+        return res

@@ -1,31 +1,39 @@
 import sys
 import os
-import time
+import asyncio
 
 # Add root directory to python path
 sys.path.append(os.getcwd())
 
 from core.logger import logger
-from core.db import Database
+from core.db_async import AsyncDatabase
 from core.models.ir_cron import IrCron
+from core.queue import TaskQueue
 
-def main():
-    logger.info("👷 Cron Worker Starting...")
+async def main():
+    logger.info("👷 Worker Starting (Async)...")
     
     # Initialize DB (Pool)
     try:
-        Database.connect()
+        await AsyncDatabase.initialize()
     except Exception as e:
         logger.critical(f"Worker failed to connect to DB: {e}", exc_info=True)
         return
 
-    # Run Loop
+    # Run Loops
     try:
-        IrCron.runner_loop()
+        # Run both Cron and Queue in parallel
+        await asyncio.gather(
+            IrCron.runner_loop(),
+            TaskQueue.worker()
+        )
     except KeyboardInterrupt:
         logger.info("Worker Stopping...")
     except Exception as e:
         logger.critical(f"Worker Crashed: {e}", exc_info=True)
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass

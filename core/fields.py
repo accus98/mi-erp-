@@ -13,7 +13,7 @@ class Field(Generic[T]):
     _type = None
     _sql_type = None
 
-    def __init__(self, string=None, required=False, help=None, readonly=False, compute=None, store=True, default=None, translate=False, groups=None):
+    def __init__(self, string=None, required=False, help=None, readonly=False, compute=None, store=True, default=None, translate=False, groups=None, index=None):
         self.string = string
         self.required = required
         self.help = help
@@ -24,6 +24,7 @@ class Field(Generic[T]):
         self.default = default
         self.translate = translate
         self.groups = groups
+        self.index = index
         
         if compute and not store:
             self.store = False

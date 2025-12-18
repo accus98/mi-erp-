@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Tuple
 from .registry import Registry
 from .fields import Field, Integer, Datetime, Many2one, One2many, Many2many, Binary, Char, Text
 from .db_async import AsyncDatabase
+import json
 
 class MetaModel(type):
     def __new__(mcs, name, bases, attrs):
@@ -268,6 +269,20 @@ class Model(metaclass=MetaModel):
             # Fallback if something breaks during boot or early init
             print(f"Access Check Warning: Could not fetch groups: {e}")
             pass
+            
+        # Global Cache Check
+        from .security import AccessCache
+        # Tuple must be hashable and sorted for consistency
+        groups_key = tuple(sorted(user_groups)) if user_groups else ()
+        global_key = (groups_key, self._name, operation)
+        
+        cached_result = AccessCache.get(global_key)
+        if cached_result is not None:
+             self.env.permission_cache[cache_key] = cached_result
+             if cached_result:
+                 return True
+             else:
+                 raise Exception(f"Access Denied: You cannot {operation} document {self._name}")
 
         cr = self.env.cr
         from .tools.sql import SQLParams
@@ -293,7 +308,11 @@ class Model(metaclass=MetaModel):
         await cr.execute(query, sql.get_params())
         if cr.fetchone():
             self.env.permission_cache[cache_key] = True
+            AccessCache.set(global_key, True)
             return True
+            
+        # Cache Negative Result too
+        AccessCache.set(global_key, False)
         raise Exception(f"Access Denied: You cannot {operation} document {self._name}")
 
     def name_get(self):
@@ -848,6 +867,24 @@ class Model(metaclass=MetaModel):
 
 
 
+
+    async def _notify_change(self, operation):
+        """
+        Send Real-Time Notification via Postgres Channel.
+        """
+        if not self.ids: return
+        try:
+            payload = json.dumps({
+                "model": self._name,
+                "ids": list(self.ids),
+                "type": operation,
+                "uid": self.env.uid
+            })
+            # Use param to prevent syntax issues/injection
+            await self.env.cr.execute("SELECT pg_notify('record_change', $1)", (payload,))
+        except Exception as e:
+            print(f"Notification Error: {e}")
+
     async def create(self, vals_list):
         """
         Create new record(s).
@@ -1013,6 +1050,7 @@ class Model(metaclass=MetaModel):
         records._modified(list(all_keys))
         await records.recompute()
                      
+        await records._notify_change('create')
         return records
 
     async def _write_db(self, vals):
@@ -1124,6 +1162,7 @@ class Model(metaclass=MetaModel):
         # 2. Trigger Compute Logic
         self._modified(list(vals.keys()))
         await self.recompute()
+        await self._notify_change('write')
 
         return True
 
@@ -1292,6 +1331,7 @@ class Model(metaclass=MetaModel):
         
         query = f'DELETE FROM "{self._table}" WHERE id IN ({placeholders})'
         await self.env.cr.execute(query, sql.get_params())
+        await self._notify_change('unlink')
         return True
 
     async def _process_one2many(self, record, field_name, commands):
@@ -1428,12 +1468,45 @@ class Model(metaclass=MetaModel):
         # 3. Get Field Meta
         fields_info = self.fields_get(all_fields=field_nodes)
         
+        # 4. Extract Toolbar Actions
+        # Helper to find buttons in architecture
+        toolbar = {'print': [], 'action': []}
+        
+        # A. Recursive search for <button> in arch
+        def extract_buttons(node):
+            if node['tag'] == 'button':
+                btn = {
+                    'name': node['attrs'].get('string', node['attrs'].get('name')),
+                    'type': node['attrs'].get('type', 'object'),
+                    'method': node['attrs'].get('name'),
+                    'modifiers': node['attrs'].get('modifiers', '{}') # TODO: Dynamic syntax
+                }
+                toolbar['action'].append(btn)
+            
+            for child in node.get('children', []):
+                extract_buttons(child)
+                
+        # Only extract from <header> usually? 
+        # For now, let's extract all so frontend decides placement, 
+        # or stricly from header found in arch_json.
+        # Simple scan:
+        extract_buttons(arch_json)
+        
+        # B. Inject "Print" Actions (Simulated)
+        # In a real system, query ir.actions.report
+        toolbar['print'].append({
+            'name': 'Print PDF',
+             'type': 'ir.actions.report',
+             'action_id': 'report_pdf_default' # Placeholder
+        })
+        
         return {
             'arch': arch_json,
             # 'arch_xml': arch_xml, # Debug
             'fields': fields_info,
             'model': self._name,
-            'view_id': view.id
+            'view_id': view.id,
+            'toolbar': toolbar # Protocol Enhancement
         }
 
     async def _fetch_fields(self, field_names):
@@ -1504,6 +1577,17 @@ class Model(metaclass=MetaModel):
             if not field.column2: field.column2 = f"{t2}_id"
             
             await AsyncDatabase.create_pivot_table(cr, field.relation, field.column1, t1, field.column2, t2)
+
+        # Create Indexes
+        for name, field in cls._fields.items():
+            if getattr(field, 'index', None):
+                # If index is True, default to btree
+                # If index is 'gin', 'gist', etc. use it
+                method = 'btree'
+                if isinstance(field.index, str):
+                    method = field.index
+                
+                await AsyncDatabase.create_index(cr, cls._table, name, method=method)
 
 class TransientModel(Model):
     _transient = True
