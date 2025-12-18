@@ -37,8 +37,9 @@ def safe_eval(expr, globals_dict=None, locals_dict=None):
         # minimal=True removes most builtins/math to be stricter? 
         # But Odoo domains often use len(), etc.
         # We rely on asteval's safe defaults (no open, no import).
+        # Fix DoS: Limit execution time to 2 seconds.
         
-        aeval = Interpreter(usersyms=context, minimal=False) 
+        aeval = Interpreter(usersyms=context, minimal=False, max_time=2) 
         
         try:
             return aeval.eval(expr)

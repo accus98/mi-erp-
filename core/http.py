@@ -58,6 +58,8 @@ def route(route_path, auth='user'):
     return decorator
 
 
+import secrets
+
 class Session:
     # File-based Persistence
     SESSION_DIR = 'sessions'
@@ -67,6 +69,7 @@ class Session:
         self.uid = None
         self.login = None
         self.context = {}
+        self.csrf_token = secrets.token_urlsafe(32)
         self._dirty = False
 
     @classmethod
@@ -79,7 +82,7 @@ class Session:
 
     @classmethod
     def new(cls):
-        sid = str(uuid.uuid4())
+        sid = secrets.token_urlsafe(32)
         sess = cls(sid)
         sess.save()
         return sess
@@ -95,6 +98,8 @@ class Session:
                 sess.uid = data.get('uid')
                 sess.login = data.get('login')
                 sess.context = data.get('context', {})
+                # Restore or rotate CSRF
+                sess.csrf_token = data.get('csrf_token', sess.csrf_token)
                 return sess
             except:
                 return None
@@ -105,7 +110,8 @@ class Session:
         data = {
             'uid': self.uid,
             'login': self.login,
-            'context': self.context
+            'context': self.context,
+            'csrf_token': self.csrf_token
         }
         with open(path, 'w') as f:
             json.dump(data, f)
@@ -203,17 +209,19 @@ def dispatch(handler):
         file_path = static_match.group(2)
         
         # Check integrity (no traverse up)
-        if '..' in file_path:
+        base_path = os.path.join(os.getcwd(), 'addons', mod_name, 'static')
+        full_path = os.path.join(base_path, file_path)
+        
+        # Security: Path Traversal Fix
+        # 1. Resolve to absolute path
+        abs_base = os.path.abspath(base_path)
+        abs_target = os.path.abspath(full_path)
+        
+        # 2. Verify strict containment
+        if not abs_target.startswith(abs_base):
+             print(f"SECURITY ALERT: Path Traversal attempt blocked: {file_path}")
              handler.send_error(403, "Forbidden")
              return
-
-        # Locate file
-        # Assume addons in root/addons
-        # Or iterate sys.path? 
-        # For MVP, assume cwd/addons. Or use Registry paths if we tracked them.
-        # We will assume 'addons/{mod_name}/static/{file_path}' relative to CWD.
-        base_path = os.getcwd()
-        full_path = os.path.join(base_path, 'addons', mod_name, 'static', file_path)
         
         if os.path.exists(full_path) and os.path.isfile(full_path):
             try:
@@ -264,6 +272,16 @@ def dispatch(handler):
             # Basic Login Redirect or 403
             handler.send_error(403, "Forbidden: Login Required")
             return
+
+    # 2.5 CSRF Check
+    if req.command in ('POST', 'PUT', 'DELETE', 'PATCH'):
+        # Exemptions
+        if req.path_clean not in ['/web/login', '/web/session/destroy', '/web/session/check']:
+            token = req.headers.get('X-CSRF-Token')
+            if not token or token != req.session.csrf_token:
+                print(f"SECURITY ALERT: CSRF Mismatch in Legacy Dispatch: {req.path_clean}")
+                handler.send_error(403, "Forbidden: CSRF Token Invalid")
+                return
             
     # 3. DB Context
     from core.db import Database
