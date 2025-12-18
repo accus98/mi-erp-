@@ -6,7 +6,7 @@ class Environment:
     It encapsulates the database cursor, the user ID, the context, and the cache.
     """
     def __init__(self, cr, uid, context=None):
-        self.cr = cr
+        self.cr = cr # AsyncCursor (core.db_async)
         self.uid = uid
         self.context = context or {}
         # Cache structure: {(model_name, id, field_name): value}

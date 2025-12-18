@@ -18,9 +18,10 @@ root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 git_dir = os.path.join(root_dir, '.git')
 env_file = os.path.join(root_dir, '.env')
 
-# 1. Try Git Detection
-if not os.getenv('ENV_TYPE') and os.path.exists(git_dir):
-    ENV_TYPE = 'dev'
+# 1. Try Git Detection REMOVED for Security
+# We rely ONLY on explicit .env file or Environment Variables.
+# if not os.getenv('ENV_TYPE') and os.path.exists(git_dir):
+#     ENV_TYPE = 'dev'
 
 # 2. Try .env File (Manual Load)
 if os.path.exists(env_file):

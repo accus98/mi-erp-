@@ -1,8 +1,12 @@
-
 import os
 import redis
 import json
 import logging
+
+# WARNING: redis.Redis is SYNCHRONOUS.
+# In a high-concurrency async app, consider switching to redis.asyncio.
+# However, for typical ERP loads, the sub-millisecond blocking is often acceptable.
+# Ensure 'use_redis = False' (Local Memory) for max speed in Dev/Single-worker.
 
 class RedisCache:
     _instance = None

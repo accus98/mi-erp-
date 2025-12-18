@@ -1,3 +1,6 @@
+# WARNING: THIS MODULE IS SYNCHRONOUS (BSYNC).
+# DO NOT USE IN FASTAPI ROUTERS OR ASYNC CONTEXTS.
+# Use core.db_async.AsyncDatabase instead.
 
 import psycopg2
 import psycopg2.extras
@@ -35,10 +38,9 @@ class Database:
             env_type = os.getenv('ENV_TYPE', 'prod')
             
             # Smart Dev Detection & .env Loader
-            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            if not os.getenv('ENV_TYPE') and os.path.exists(os.path.join(root_dir, '.git')):
-                 env_type = 'dev'
+            # Git Detection REMOVED.
             
+            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             env_file = os.path.join(root_dir, '.env')
             if os.path.exists(env_file):
                 try:

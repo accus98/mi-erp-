@@ -1,3 +1,8 @@
+# WARNING: THIS MODULE IS LEGACY/BLOCKING.
+# It contains synchronous I/O (File Sessions).
+# FastAPI uses core/session.py instead.
+# DO NOT USE core.http.Session in async code.
+
 import json
 import uuid
 import threading

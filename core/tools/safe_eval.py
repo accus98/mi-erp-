@@ -6,6 +6,9 @@ def safe_eval(expr, globals_dict=None, locals_dict=None):
     """
     Safely evaluate an expression string using a restricted environment.
     Prevents access to unsafe builtins like __import__, open, etc.
+    
+    WARNING: This uses 'eval()'. While heavily restricted, it is not a perfect sandbox.
+    For High-Security environments, migrate to 'asteval' or a strict parser.
     """
     if globals_dict is None:
         globals_dict = {}
