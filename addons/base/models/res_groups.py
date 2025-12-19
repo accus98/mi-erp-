@@ -12,3 +12,21 @@ class ResGroups(Model):
     # helper for inheritance
     def get_application_groups(self, domain=None):
         return self.search(domain or [])
+
+    async def create(self, vals):
+        from core.security import AccessCache
+        res = await super().create(vals)
+        await AccessCache.invalidate()
+        return res
+
+    async def write(self, vals):
+        from core.security import AccessCache
+        res = await super().write(vals)
+        await AccessCache.invalidate()
+        return res
+
+    async def unlink(self):
+        from core.security import AccessCache
+        res = await super().unlink()
+        await AccessCache.invalidate()
+        return res

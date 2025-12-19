@@ -6,8 +6,8 @@ from passlib.context import CryptContext
 import os
 
 # Configuración de Hashing
-# Fallback to pbkdf2_sha256 due to bcrypt/passlib compatibility issues
-pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+# Hashing Config: Argon2 > Bcrypt > PBKDF2
+pwd_context = CryptContext(schemes=["argon2", "bcrypt", "pbkdf2_sha256"], deprecated="auto")
 
 SECRET_KEY = os.getenv('SECRET_KEY')
 ENV_TYPE = os.getenv('ENV_TYPE', 'prod')

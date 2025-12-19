@@ -16,17 +16,17 @@ class IrModelAccess(Model):
     async def create(self, vals):
         from core.security import AccessCache
         res = await super().create(vals)
-        AccessCache.invalidate()
+        await AccessCache.invalidate()
         return res
 
     async def write(self, vals):
         from core.security import AccessCache
         res = await super().write(vals)
-        AccessCache.invalidate()
+        await AccessCache.invalidate()
         return res
 
     async def unlink(self):
         from core.security import AccessCache
         res = await super().unlink()
-        AccessCache.invalidate()
+        await AccessCache.invalidate()
         return res

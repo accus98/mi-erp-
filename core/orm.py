@@ -155,7 +155,11 @@ class Model(metaclass=MetaModel):
                  # If value not in cache, we technically should error or return None?
                  # Odoo would lazy load. We can't.
                  # Return None or raise? Raise helps debugging.
-                 raise AttributeError(f"Field '{name}' not in cache for {self}. Use await record.read(['{name}']) first.")
+                 raise AttributeError(
+                     f"Lazy Loading Error: Field '{name}' is not in cache for {self}. "
+                     f"This is an async ORM. You must explicitly await data loading: "
+                     f"await record.read(['{name}']) (or 'ensure()')."
+                 )
         
         # 2. Delegate (Method missing? No, methods are found by python first)
         raise AttributeError(f"'{self._name}' object has no attribute '{name}'")
@@ -483,6 +487,11 @@ class Model(metaclass=MetaModel):
             
             # 1. Validate Field
             # id, create_date, write_date should be accepted even if not in _fields
+            
+            # Reject Relational Syntax explicitly
+            if '.' in field_name:
+                 raise ValueError(f"Security Error: Relational ordering '{field_name}' not supported. Use search() with join logic or computed stored fields.")
+                 
             if field_name not in self._fields and field_name not in ('id', 'create_date', 'write_date'):
                  raise ValueError(f"Security Error: Invalid Order Field '{field_name}' for model {self._name}")
             
@@ -1372,10 +1381,14 @@ class Model(metaclass=MetaModel):
         await records._notify_change('create')
         return records
 
-    async def _write_db(self, vals):
+    async def __write_db_internal(self, vals):
         """
         Low-level write to DB without triggering recompute logic.
         Used by caching, recompute engine, and write() itself.
+        
+        WARNING: This method does NOT check access rights. 
+        It is strictly internal. Do NOT use it directly. 
+        Use write() instead.
         """
         if not self.ids: return True
         
@@ -1508,7 +1521,7 @@ class Model(metaclass=MetaModel):
              pass # raise Exception("Security Error")
 
         # 1. DB Write (No Triggers)
-        await self._write_db(vals.copy())
+        await self.__write_db_internal(vals.copy())
         
         # 2. Trigger Compute Logic
         self._modified(list(vals.keys()))
@@ -1665,10 +1678,10 @@ class Model(metaclass=MetaModel):
                         vals_to_ids[key].append(rid)
                     except TypeError:
                         # Fallback for unhashable values
-                        await Model.browse([rid])._write_db(vals)
+                        await Model.browse([rid]).__write_db_internal(vals)
                         
                 for key_items, rids in vals_to_ids.items():
-                    await Model.browse(rids)._write_db(dict(key_items))
+                    await Model.browse(rids).__write_db_internal(dict(key_items))
 
     async def unlink(self):
         await self.check_access_rights('unlink')
