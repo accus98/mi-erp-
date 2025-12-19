@@ -1,4 +1,4 @@
-from core.http import route, Response
+from core.routing import route, Response
 import inspect
 
 @route('/', auth='public')

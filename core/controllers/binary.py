@@ -1,5 +1,5 @@
 import base64
-from core.http import route, Response
+from core.routing import route, Response
 
 @route('/web/content/<string:model>/<int:id>/<string:field>', auth='user')
 def download_content(req, env):

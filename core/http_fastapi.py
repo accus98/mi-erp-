@@ -12,7 +12,7 @@ import re
 import uuid
 
 # Import original http to get ROUTES and Session logic
-from core.http import ROUTES, Response as NexusResponse
+from core.routing import ROUTES, Response as NexusResponse
 from core.cache import Cache
 
 # Import middleware/deps
