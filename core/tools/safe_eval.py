@@ -6,12 +6,16 @@ try:
     from asteval import Interpreter
 except ImportError:
     Interpreter = None
-    print("WARNING: 'asteval' not found. Falling back to unsafe eval(). Please install 'asteval'.")
+    # 'asteval' not found. safe_eval will raise strict error.
 
 def safe_eval(expr, globals_dict=None, locals_dict=None):
     """
     Safely evaluate an expression using 'asteval'.
     This provides a much stronger sandbox than restricted eval().
+    
+    WARNING: Do NOT pass full ORM records or objects with internal state (e.g. 'env', 'cr') 
+    into globals_dict/locals_dict. Only pass primitive types (str, int, list, dict) 
+    or Safe Proxies to prevent sandbox escape.
     """
     if globals_dict is None:
         globals_dict = {}

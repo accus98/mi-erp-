@@ -16,7 +16,7 @@ sys.path.append(os.getcwd())
 try:
     import core.http_fastapi
     from core.registry import Registry
-    from core.db import Database
+    from core.db_sync import Database
 except ImportError as e:
     print(f"Could not load Nexus App: {e}")
     sys.exit(1)

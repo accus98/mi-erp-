@@ -1,6 +1,6 @@
 
 import re
-from core.db import Database
+from core.db_sync import Database
 
 class POLoader:
     @staticmethod

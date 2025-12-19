@@ -2,7 +2,7 @@ import base64
 from core.routing import route, Response
 
 @route('/web/content/<string:model>/<int:id>/<string:field>', auth='user')
-def download_content(req, env):
+async def download_content(req, env):
     """
     Download binary content from a specific field of a record.
     """
@@ -16,7 +16,8 @@ def download_content(req, env):
         record = env[model_name].browse([res_id])
         
         # Read field
-        # getattr triggers __get__ which fetches from attachment or cache
+        # Async ORM: Must prefetch via read() before accessing attribute
+        await record.read([field_name])
         b64_data = getattr(record, field_name)
         
         if not b64_data:

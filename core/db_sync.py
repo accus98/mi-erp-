@@ -12,11 +12,11 @@ import threading
 
 # Threaded Pool for managing connections
 _pool = None
+import re
 
 class Database:
     @staticmethod
     def _validate_identifier(name):
-        import re
         if not re.match(r'^[a-z0-9_]+$', name):
              raise ValueError(f"Security Error: Invalid Identifier '{name}'. Only lowercase alphanumeric and underscores allowed.")
         return name
@@ -114,14 +114,19 @@ class Database:
         # Postgres Adaptation
         cls._validate_identifier(table_name)
         
-        # 1. Sanitize Columns
+            # 1. Sanitize Columns
         safe_cols = []
         for col in columns:
             # Security Check: Prevent SQL Injection in Column Definition
             # DDL is sensitive. We block comments and terminators.
-            if ";" in col or "--" in col or "/*" in col:
+            if ";" in col or "--" in col or "/*" in col or "'" in col:
                  raise ValueError(f"Security Error: Invalid characters in column definition '{col}'")
-                 
+            
+            # Whitelist Check: Must start with a proper quoted identifier
+            # e.g. '"name" VARCHAR...'
+            if not re.match(r'^\s*"[a-zA-Z0-9_]+"', col):
+                 raise ValueError(f"Security Error: Column definition must start with a quoted identifier. Got: '{col}'")
+
             # SQLite "INTEGER PRIMARY KEY AUTOINCREMENT" -> Postgres "SERIAL PRIMARY KEY"
             # Since our ORM usually sends '"id" INTEGER PRIMARY KEY AUTOINCREMENT'
             if "INTEGER PRIMARY KEY AUTOINCREMENT" in col:

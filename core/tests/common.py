@@ -8,7 +8,7 @@ import os
 if os.getcwd() not in sys.path:
     sys.path.append(os.getcwd())
 
-from core.db import Database
+from core.db_sync import Database
 from core.env import Environment
 from core.registry import Registry
 

@@ -5,7 +5,7 @@ import sys
 # Ensure project root is in path
 sys.path.append(os.getcwd())
 
-from core.db import Database
+from core.db_sync import Database
 from core.registry import Registry
 from core.env import Environment
 import addons.base.models.res_users

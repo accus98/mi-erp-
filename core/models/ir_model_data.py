@@ -1,6 +1,6 @@
 from core.orm import Model
 from core.fields import Char, Integer
-from core.db import Database
+from core.db_sync import Database
 
 class IrModelData(Model):
     _name = 'ir.model.data'

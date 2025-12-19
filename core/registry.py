@@ -1,4 +1,4 @@
-from core.db import Database
+from core.db_sync import Database
 
 class Registry:
     """
